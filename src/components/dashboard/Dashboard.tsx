@@ -8,6 +8,8 @@ import {
   Download,
   Upload,
   Monitor,
+  ArrowDown,
+  ArrowUp,
 } from "lucide-react";
 import { useSyncStore } from "../../stores/syncStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -19,37 +21,40 @@ export default function Dashboard() {
   const {
     status,
     isSyncing,
+    isRefreshing,
+    repoStatus,
     lastResult,
     pullLog,
-    syncNow,
     pullNow,
     pushNow,
+    checkRepoStatus,
     refreshStatus,
-    refreshPending,
     refreshPullLog,
   } = useSyncStore();
   const { machineConfig } = useSettingsStore();
 
   useEffect(() => {
     refreshStatus();
-    refreshPending();
+    checkRepoStatus();
     refreshPullLog();
     const interval = setInterval(() => {
       refreshStatus();
-      refreshPending();
     }, 30_000);
     return () => clearInterval(interval);
   }, []);
 
-  const handleSync = async () => {
-    try { await syncNow(); } catch (e) { console.error(e); }
+  const handleRefresh = async () => {
+    try { await checkRepoStatus(); } catch (e) { console.error(e); }
   };
   const handlePull = async () => {
-    try { await pullNow(); } catch (e) { console.error(e); }
+    try { await pullNow(); await checkRepoStatus(); } catch (e) { console.error(e); }
   };
   const handlePush = async () => {
-    try { await pushNow(); } catch (e) { console.error(e); }
+    try { await pushNow(); await checkRepoStatus(); } catch (e) { console.error(e); }
   };
+
+  const localCount = repoStatus?.local_changes.length ?? 0;
+  const remoteCount = repoStatus?.commits_behind ?? 0;
 
   return (
     <div className="p-6 max-w-4xl">
@@ -64,32 +69,71 @@ export default function Dashboard() {
         <div className="flex items-center gap-2">
           <button
             onClick={handlePull}
-            disabled={isSyncing}
+            disabled={isSyncing || isRefreshing}
             title="Pull — apply remote changes to this machine"
             className="btn-secondary flex items-center gap-1.5 text-sm"
           >
             <Download size={14} className={isSyncing ? "animate-bounce" : ""} />
             Pull
+            {remoteCount > 0 && (
+              <span className="badge-blue ml-0.5">{remoteCount}</span>
+            )}
           </button>
           <button
             onClick={handlePush}
-            disabled={isSyncing}
+            disabled={isSyncing || isRefreshing}
             title="Push — commit local changes to remote"
             className="btn-secondary flex items-center gap-1.5 text-sm"
           >
             <Upload size={14} className={isSyncing ? "animate-bounce" : ""} />
             Push
+            {localCount > 0 && (
+              <span className="badge-yellow ml-0.5">{localCount}</span>
+            )}
           </button>
           <button
-            onClick={handleSync}
-            disabled={isSyncing}
+            onClick={handleRefresh}
+            disabled={isRefreshing || isSyncing}
+            title="Check what's new on GitHub vs local"
             className="btn-primary flex items-center gap-2"
           >
-            <RefreshCw size={15} className={isSyncing ? "animate-spin" : ""} />
-            {isSyncing ? "Syncing..." : "Sync Now"}
+            <RefreshCw size={15} className={isRefreshing ? "animate-spin" : ""} />
+            {isRefreshing ? "Checking..." : "Refresh"}
           </button>
         </div>
       </div>
+
+      {/* Status banners */}
+      {repoStatus && !repoStatus.error && (remoteCount > 0 || localCount > 0) && (
+        <div className="flex gap-3 mb-4">
+          {remoteCount > 0 && (
+            <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-info/10 border border-info/20 text-sm">
+              <ArrowDown size={13} className="text-info" />
+              <span className="text-info font-medium">{remoteCount} new commit{remoteCount !== 1 ? "s" : ""} on GitHub</span>
+              <span className="text-text-muted">— hit Pull</span>
+            </div>
+          )}
+          {localCount > 0 && (
+            <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-warning/10 border border-warning/20 text-sm">
+              <ArrowUp size={13} className="text-warning" />
+              <span className="text-warning font-medium">{localCount} local file{localCount !== 1 ? "s" : ""} not on GitHub</span>
+              <span className="text-text-muted">— hit Push</span>
+            </div>
+          )}
+        </div>
+      )}
+      {repoStatus && !repoStatus.error && remoteCount === 0 && localCount === 0 && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-success/10 border border-success/20 text-sm mb-4">
+          <CheckCircle size={13} className="text-success" />
+          <span className="text-success font-medium">Everything is in sync</span>
+        </div>
+      )}
+      {repoStatus?.error && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-error/10 border border-error/20 text-sm mb-4">
+          <AlertTriangle size={13} className="text-error" />
+          <span className="text-error">{repoStatus.error}</span>
+        </div>
+      )}
 
       {/* Status cards */}
       <div className="grid grid-cols-3 gap-4 mb-6">
@@ -112,15 +156,15 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="card">
-          <div className="text-xs text-text-muted mb-1">Pending Changes</div>
+          <div className="text-xs text-text-muted mb-1">Local Changes</div>
           <div className="flex items-center gap-2">
-            {status?.pending_changes ? (
-              <AlertTriangle size={14} className="text-warning" />
+            {localCount > 0 ? (
+              <ArrowUp size={14} className="text-warning" />
             ) : (
               <CheckCircle size={14} className="text-success" />
             )}
             <span className="text-sm text-text">
-              {status?.pending_changes ?? 0} files
+              {localCount} file{localCount !== 1 ? "s" : ""} to push
             </span>
           </div>
         </div>

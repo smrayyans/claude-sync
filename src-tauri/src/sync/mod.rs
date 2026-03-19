@@ -38,3 +38,14 @@ pub enum ChangeType {
     Modified,
     Deleted,
 }
+
+/// Result of a non-destructive status check (Refresh button).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoStatus {
+    /// Local files that differ from what's committed in the sync repo.
+    pub local_changes: Vec<FileChange>,
+    /// How many commits the remote is ahead of our local sync repo.
+    pub commits_behind: usize,
+    pub is_online: bool,
+    pub error: Option<String>,
+}

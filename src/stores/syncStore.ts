@@ -30,9 +30,18 @@ export interface PullLogEntry {
   timestamp: string;
 }
 
+export interface RepoStatus {
+  local_changes: FileChange[];
+  commits_behind: number;
+  is_online: boolean;
+  error: string | null;
+}
+
 interface SyncStore {
   status: SyncStatus | null;
   pendingChanges: FileChange[];
+  repoStatus: RepoStatus | null;
+  isRefreshing: boolean;
   isSyncing: boolean;
   lastResult: SyncResult | null;
   pullLog: PullLogEntry[];
@@ -41,6 +50,7 @@ interface SyncStore {
   refreshStatus: () => Promise<void>;
   refreshPending: () => Promise<void>;
   refreshPullLog: () => Promise<void>;
+  checkRepoStatus: () => Promise<void>;
   syncNow: () => Promise<SyncResult>;
   pullNow: () => Promise<SyncResult>;
   pushNow: () => Promise<SyncResult>;
@@ -63,6 +73,8 @@ async function invokeSync(command: string): Promise<SyncResult> {
 export const useSyncStore = create<SyncStore>((set, get) => ({
   status: null,
   pendingChanges: [],
+  repoStatus: null,
+  isRefreshing: false,
   isSyncing: false,
   lastResult: null,
   pullLog: [],
@@ -83,6 +95,25 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   refreshPullLog: async () => {
     const pullLog = await invoke<PullLogEntry[]>("get_pull_log");
     set({ pullLog });
+  },
+
+  checkRepoStatus: async () => {
+    set({ isRefreshing: true });
+    try {
+      const repoStatus = await invoke<RepoStatus>("check_repo_status");
+      set({ repoStatus });
+    } catch (err) {
+      set({
+        repoStatus: {
+          local_changes: [],
+          commits_behind: 0,
+          is_online: false,
+          error: String(err),
+        },
+      });
+    } finally {
+      set({ isRefreshing: false });
+    }
   },
 
   syncNow: async () => {

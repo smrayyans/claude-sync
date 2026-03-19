@@ -13,7 +13,7 @@ use crate::sync::{
     },
     machine::{read_machine_config, write_machine_config, append_pull_log, read_pull_log, PullLogEntry},
     watcher::wait_for_stable,
-    ChangeType, FileChange, SyncResult, SyncStatus,
+    ChangeType, FileChange, RepoStatus, SyncResult, SyncStatus,
 };
 
 // Files/dirs to never sync
@@ -490,21 +490,24 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
             continue;
         }
 
-        // If remote is empty, force-push everything; otherwise only changed files
-        let stored_hash = hashes.hashes.get(file_key).cloned();
-        let current_hash = hash_file(local_path).ok();
-        let changed = !remote_has_data || match (&stored_hash, &current_hash) {
-            (None, Some(_)) => true,
-            (Some(s), Some(c)) if s != c => true,
-            _ => false,
+        let repo_path = sync_repo.join(file_key);
+
+        // Compare local vs what's actually in the sync repo (ground truth)
+        let changed = if !remote_has_data || !repo_path.exists() {
+            // Remote empty or file not in sync repo yet — push it
+            true
+        } else {
+            let local_hash = hash_file(local_path).unwrap_or_default();
+            let repo_hash = hash_file(&repo_path).unwrap_or_default();
+            local_hash != repo_hash
         };
 
         if changed {
-            let remote_path = sync_repo.join(file_key);
-            if let Some(parent) = remote_path.parent() {
+            if let Some(parent) = repo_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::copy(local_path, &remote_path)?;
+            std::fs::copy(local_path, &repo_path)?;
+            let current_hash = hash_file(local_path).ok();
             if let Some(hash) = current_hash {
                 update_hash(&mut hashes, file_key, &hash);
             }
@@ -580,6 +583,123 @@ pub fn get_pending_changes() -> Vec<FileChange> {
     }
 
     changes
+}
+
+/// Non-destructive status check: fetch remote + compare local vs sync repo.
+/// Does NOT modify any files or hashes.
+pub async fn check_repo_status() -> RepoStatus {
+    let config = match read_machine_config().await {
+        Ok(c) => c,
+        Err(e) => {
+            return RepoStatus {
+                local_changes: vec![],
+                commits_behind: 0,
+                is_online: false,
+                error: Some(e.to_string()),
+            };
+        }
+    };
+
+    let remote_url = match &config.remote_url {
+        Some(url) => url.clone(),
+        None => {
+            return RepoStatus {
+                local_changes: vec![],
+                commits_behind: 0,
+                is_online: false,
+                error: Some("No remote configured".to_string()),
+            };
+        }
+    };
+
+    let is_online = check_online().await;
+
+    let token = auth::get_token(&remote_url).unwrap_or_default();
+    let sync_repo = sync_repo_path();
+
+    // Open or clone sync repo
+    let repository = match if sync_repo.exists() {
+        repo::open_repo(&sync_repo)
+    } else {
+        repo::clone_repo(&remote_url, &sync_repo, &token)
+    } {
+        Ok(r) => r,
+        Err(e) => {
+            return RepoStatus {
+                local_changes: vec![],
+                commits_behind: 0,
+                is_online,
+                error: Some(format!("Cannot open sync repo: {e}")),
+            };
+        }
+    };
+
+    // Fetch from remote to update origin/main
+    let mut commits_behind = 0usize;
+    if is_online && !token.is_empty() {
+        if let Ok(true) = repo::fetch(&repository, &token) {
+            // Count how many commits remote is ahead of local
+            if let (Ok(local_head), Ok(remote_ref)) = (
+                repository.head().and_then(|h| h.peel_to_commit()),
+                repository.find_reference("refs/remotes/origin/main")
+                    .and_then(|r| r.peel_to_commit()),
+            ) {
+                if let Ok((_, behind)) = repository.graph_ahead_behind(local_head.id(), remote_ref.id()) {
+                    commits_behind = behind;
+                }
+            }
+        }
+    }
+
+    // Compare local files vs what's in the sync repo (ground truth of last push)
+    let claude_dir = claude_dir();
+    let tracked = collect_tracked_files(&claude_dir);
+    let mut local_changes = vec![];
+
+    for (file_key, local_path) in &tracked {
+        let repo_path = sync_repo.join(file_key);
+
+        match (local_path.exists(), repo_path.exists()) {
+            (true, false) => {
+                // Local file exists but not in sync repo → added locally
+                let size_bytes = local_path.metadata().map(|m| m.len()).ok();
+                local_changes.push(FileChange {
+                    path: file_key.clone(),
+                    change_type: ChangeType::Added,
+                    size_bytes,
+                });
+            }
+            (false, true) => {
+                // In sync repo but deleted locally
+                local_changes.push(FileChange {
+                    path: file_key.clone(),
+                    change_type: ChangeType::Deleted,
+                    size_bytes: None,
+                });
+            }
+            (true, true) => {
+                // Both exist — compare content hashes
+                let local_hash = hash_file(local_path).unwrap_or_default();
+                let repo_hash = hash_file(&repo_path).unwrap_or_default();
+                if local_hash != repo_hash {
+                    let size_bytes = local_path.metadata().map(|m| m.len()).ok();
+                    local_changes.push(FileChange {
+                        path: file_key.clone(),
+                        change_type: ChangeType::Modified,
+                        size_bytes,
+                    });
+                }
+            }
+            (false, false) => {}
+        }
+    }
+
+    RepoStatus {
+        local_changes,
+        commits_behind,
+        is_online,
+        error: None,
+    }
 }
 
 pub async fn resolve_file_conflict(

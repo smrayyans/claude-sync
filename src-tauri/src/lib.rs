@@ -39,6 +39,7 @@ pub fn run() {
             get_pull_log,
             get_sync_status,
             get_pending_changes,
+            check_repo_status,
             // Agent commands
             list_agents,
             get_agent,

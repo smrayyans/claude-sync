@@ -1,6 +1,6 @@
 use tauri::AppHandle;
 
-use crate::sync::{engine, FileChange, SyncResult, SyncStatus};
+use crate::sync::{engine, FileChange, RepoStatus, SyncResult, SyncStatus};
 use crate::sync::machine::{read_machine_config, PullLogEntry};
 
 #[tauri::command]
@@ -48,4 +48,9 @@ pub async fn get_sync_status() -> SyncStatus {
 #[tauri::command]
 pub async fn get_pending_changes() -> Vec<FileChange> {
     engine::get_pending_changes()
+}
+
+#[tauri::command]
+pub async fn check_repo_status() -> RepoStatus {
+    engine::check_repo_status().await
 }
