@@ -26,14 +26,51 @@ Keeps `agents/`, `skills/`, `projects/*/memory/`, `settings.json`, and **chat hi
 
 ## Installation
 
-### Option A — AppImage (Linux, no install)
+### Option A — AppImage (Linux, recommended)
 
-Download the latest `.AppImage` from [Releases](https://github.com/smrayyans/claude-sync/releases), then:
+Download the latest `.AppImage` from [Releases](https://github.com/smrayyans/claude-sync/releases), then install it system-wide so it shows up in your app menu / search bar:
 
 ```bash
+# Make it executable and move to a permanent location
 chmod +x claude-sync_*.AppImage
-./claude-sync_*.AppImage
+mkdir -p ~/.local/bin
+mv claude-sync_*.AppImage ~/.local/bin/claude-sync.AppImage
+
+# Extract the icon
+cd /tmp
+~/.local/bin/claude-sync.AppImage --appimage-extract usr/share/icons >/dev/null 2>&1
+mkdir -p ~/.local/share/icons
+cp squashfs-root/usr/share/icons/hicolor/256x256@2/apps/claude-sync.png ~/.local/share/icons/claude-sync.png
+rm -rf squashfs-root
+cd -
+
+# Create a .desktop entry so it appears in your app launcher
+cat > ~/.local/share/applications/claude-sync.desktop << 'EOF'
+[Desktop Entry]
+Name=Claude Sync
+Comment=Sync your Claude Code environment across machines
+Exec=$HOME/.local/bin/claude-sync.AppImage
+Icon=$HOME/.local/share/icons/claude-sync.png
+Type=Application
+Categories=Development;Utility;
+StartupWMClass=claude-sync
+Terminal=false
+EOF
+
+# Replace $HOME with your actual home path
+sed -i "s|\$HOME|$HOME|g" ~/.local/share/applications/claude-sync.desktop
+
+# Refresh the app database
+update-desktop-database ~/.local/share/applications/ 2>/dev/null
 ```
+
+Now press **Super** (Windows key) and search **"Claude Sync"** — it will appear like any other app.
+
+> **Updating:** when a new version is released, just download and overwrite:
+> ```bash
+> chmod +x claude-sync_*.AppImage
+> mv claude-sync_*.AppImage ~/.local/bin/claude-sync.AppImage
+> ```
 
 ### Option B — .deb package (Debian/Ubuntu/Kali)
 
@@ -41,6 +78,8 @@ chmod +x claude-sync_*.AppImage
 sudo dpkg -i claude-sync_*.deb
 claude-sync
 ```
+
+This automatically adds the app to your system — searchable from the app menu out of the box.
 
 ### Option C — Build from source
 
