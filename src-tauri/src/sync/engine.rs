@@ -550,20 +550,18 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
     let claude_dir = claude_dir();
     let tracked_files = collect_tracked_files(&claude_dir);
     let mut files_pushed = vec![];
+    let mut files_deleted = vec![];
     let mut hashes = load_hashes();
 
+    // Detect new/modified local files
     for (file_key, local_path) in &tracked_files {
         if !local_path.exists() {
             continue;
         }
 
-        // Compare local content vs what is COMMITTED in git HEAD.
-        // Do NOT compare against working-directory files — a previous failed
-        // push may have copied the file there without committing it, causing
-        // the app to think "nothing changed" on the next push attempt.
         let committed = repo::get_file_from_head(&repository, file_key);
         let changed = match committed {
-            None => true, // not in HEAD → new file, always push
+            None => true,
             Some(ref head_bytes) => {
                 std::fs::read(local_path).unwrap_or_default() != *head_bytes
             }
@@ -582,34 +580,67 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
         }
     }
 
+    // Detect files deleted locally but still in git HEAD
+    if let Ok(head) = repository.head().and_then(|h| h.peel_to_tree()) {
+        head.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+            if entry.kind() != Some(git2::ObjectType::Blob) {
+                return git2::TreeWalkResult::Ok;
+            }
+            let file_key = if dir.is_empty() {
+                entry.name().unwrap_or("").to_string()
+            } else {
+                format!("{}{}", dir, entry.name().unwrap_or(""))
+            };
+            // Skip .gitignore
+            if file_key == ".gitignore" {
+                return git2::TreeWalkResult::Ok;
+            }
+            let local_path = claude_dir.join(&file_key);
+            if !local_path.exists() {
+                // File in HEAD but deleted locally — remove from sync repo
+                let repo_path = sync_repo.join(&file_key);
+                let _ = std::fs::remove_file(&repo_path);
+                hashes.hashes.remove(&file_key);
+                files_deleted.push(file_key);
+            }
+            git2::TreeWalkResult::Ok
+        }).ok();
+    }
+
     save_hashes(&hashes)?;
 
-    if !files_pushed.is_empty() {
-        let changed_list = files_pushed
-            .iter()
-            .map(|f| format!("  - {f}"))
+    let all_changes: Vec<String> = files_pushed.iter().chain(files_deleted.iter()).cloned().collect();
+
+    if !all_changes.is_empty() {
+        let changed_list = files_pushed.iter().map(|f| format!("  + {f}"))
+            .chain(files_deleted.iter().map(|f| format!("  - {f} (deleted)")))
             .collect::<Vec<_>>()
             .join("\n");
         let message = format!(
-            "[{}] push: {} files\n\nChanged:\n{}",
+            "[{}] push: {} changed, {} deleted\n\nChanges:\n{}",
             config.machine_name,
             files_pushed.len(),
+            files_deleted.len(),
             changed_list
         );
-        repo::stage_and_commit(&repository, &files_pushed, &message)?;
+        repo::stage_and_commit(&repository, &all_changes, &message)?;
         repo::push(&repository, &token)?;
 
         let mut config = config;
         config.last_synced = Some(chrono::Utc::now().to_rfc3339());
         write_machine_config(&config).await?;
 
-        let n = files_pushed.len();
+        let msg = match (files_pushed.len(), files_deleted.len()) {
+            (p, 0) => format!("Pushed {p} files to remote"),
+            (0, d) => format!("Deleted {d} files from remote"),
+            (p, d) => format!("Pushed {p} files, deleted {d} from remote"),
+        };
         return Ok(SyncResult {
             success: true,
-            files_pushed,
+            files_pushed: all_changes,
             files_pulled: vec![],
             conflicts: vec![],
-            message: format!("Pushed {} files to remote", n),
+            message: msg,
         });
     }
 
