@@ -66,6 +66,7 @@ pub fn run() {
             save_machine_config,
             setup_remote,
             test_remote_connection,
+            check_for_updates,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
