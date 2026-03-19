@@ -1,0 +1,60 @@
+  Claude Sync — The Big Picture
+                                                                                                                                                        
+  A desktop app for Linux that keeps your entire Claude Code environment perfectly synced across all your machines. Think of it like a "GitHub Desktop"
+  but specifically for Claude configs, memory, and agents.                                                                                              
+                                                                  
+  ---                                                                                                                                                   
+  Core Features                                                   
+                                                                                                                                                        
+  Sync Engine                                                     
+  - Sync agents (~/.claude/agents/)                                                                                                                     
+  - Sync memory files (~/.claude/projects/*/memory/)                                                                                                    
+  - Sync settings (~/.claude/settings.json)                                                                                                             
+  - Detect conflicts (PC changed + laptop changed = warn user)                                                                                          
+  - Auto-sync on a timer (every X minutes in background)                                                                                                
+                                                                                                                                                        
+  Dashboard                                                                                                                                             
+  - See all your agents listed with name + description                                                                                                  
+  - See all memory files and what's inside them                                                                                                         
+  - Last synced timestamp                                                                                                                               
+  - Which machine you're on                                                                                                                             
+  - Pending changes indicator (like git status)                                                                                                         
+                                                                                                                                                        
+  Git Integration                                                                                                                                       
+  - Push changes with one click + auto commit message                                                                                                   
+  - Pull latest with one click                                                                                                                          
+  - Full change history / log (what changed, when, from which machine)                                                                                  
+  - Conflict resolution UI                                                                                                                              
+                                                                                                                                                        
+  Agent Manager                                                                                                                                         
+  - Create new agents from a template                                                                                                                   
+  - Enable / disable agents                                                                                                                             
+  - Edit agent files directly in the app
+  - Preview what the agent does                                                                                                                         
+                                                                                                                                                        
+  Memory Viewer                                                                                                                                         
+  - Read all your memory files in a clean UI                                                                                                            
+  - Edit memory directly                                                                                                                                
+  - See which memories Claude will load for each project                                                                                                
+                                                                                                                                                        
+  Multi-machine Awareness                                                                                                                               
+  - Name your machines (PC, Laptop, etc.)                                                                                                               
+  - See which machine last pushed                                                                                                                       
+  - Per-machine status                                                                                                                                  
+                                                                                                                                                        
+  ---                                                             
+  UI Design                                                                                                                                             
+                                                                  
+  - Dark theme (matching your Cyberster report style — #121212 background, red accents)
+  - Sidebar navigation (Sync, Agents, Memory, Settings, History)                                                                                        
+  - System tray icon — always running in background                                                                                                     
+  - Notification when sync completes or conflict detected                                                                                               
+  - One big "Sync Now" button on the home screen                                                                                                        
+                                                                                                                                                        
+  ---                                                                                                                                                   
+  Tech Stack Options to Discuss                                                                                                                         
+                                                                                                                                                        
+  - Python + customtkinter — lightweight, easy, pure Python
+  - Python + PyQt6 — more powerful, proper desktop app feel                                                                                             
+  - Electron + React — full web-style UI, heaviest option                                                                                               
+  - Tauri + React — modern, lightweight, Rust backend 

@@ -1,0 +1,19 @@
+{
+  "name": "claude-sync",
+  "version": "0.1.0",
+  "description": "Sync Claude Code environments across machines",
+  "bin": {
+    "claude-sync": "./bin/claude-sync"
+  },
+  "scripts": {},
+  "optionalDependencies": {
+    "claude-sync-linux-x64": "0.1.0",
+    "claude-sync-win32-x64": "0.1.0"
+  },
+  "keywords": ["claude", "claude-code", "sync", "agents", "memory"],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16"
+  }
+}

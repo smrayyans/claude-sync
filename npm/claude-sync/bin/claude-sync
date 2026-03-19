@@ -1,0 +1,13 @@
+#!/usr/bin/env node
+"use strict";
+
+const { execFileSync } = require("child_process");
+const { getBinaryPath } = require("../index.js");
+
+try {
+  const bin = getBinaryPath();
+  execFileSync(bin, process.argv.slice(2), { stdio: "inherit" });
+} catch (err) {
+  process.stderr.write(err.message + "\n");
+  process.exit(1);
+}

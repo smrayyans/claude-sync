@@ -1,0 +1,8 @@
+{
+  "name": "claude-sync-linux-x64",
+  "version": "0.1.0",
+  "description": "claude-sync binary for Linux x64",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "license": "MIT"
+}
