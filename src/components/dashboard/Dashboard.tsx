@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import {
   RefreshCw,
   Server,
@@ -10,12 +10,27 @@ import {
   Monitor,
   ArrowDown,
   ArrowUp,
+  Bug,
 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { useSyncStore } from "../../stores/syncStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { formatRelativeTime } from "../../lib/utils";
 import PendingChanges from "./PendingChanges";
 import SyncStatus from "./SyncStatus";
+
+interface PushDiagnostic {
+  remote_url: string | null;
+  token_found: boolean;
+  sync_repo_exists: boolean;
+  sync_repo_path: string;
+  remote_has_data: boolean;
+  head_commit: string | null;
+  commits_ahead: number;
+  tracked_files_count: number;
+  files_to_push: string[];
+  error: string | null;
+}
 
 export default function Dashboard() {
   const {
@@ -31,6 +46,8 @@ export default function Dashboard() {
     refreshStatus,
     refreshPullLog,
   } = useSyncStore();
+  const [diag, setDiag] = useState<PushDiagnostic | null>(null);
+  const [diagLoading, setDiagLoading] = useState(false);
   const { machineConfig } = useSettingsStore();
 
   useEffect(() => {
@@ -45,6 +62,22 @@ export default function Dashboard() {
 
   const handleRefresh = async () => {
     try { await checkRepoStatus(); } catch (e) { console.error(e); }
+  };
+
+  const handleDiagnose = async () => {
+    setDiagLoading(true);
+    setDiag(null);
+    try {
+      const result = await invoke<PushDiagnostic>("diagnose_push");
+      setDiag(result);
+    } catch (e) {
+      setDiag({ remote_url: null, token_found: false, sync_repo_exists: false,
+        sync_repo_path: "", remote_has_data: false, head_commit: null,
+        commits_ahead: 0, tracked_files_count: 0, files_to_push: [],
+        error: String(e) });
+    } finally {
+      setDiagLoading(false);
+    }
   };
   const handlePull = async () => {
     try { await pullNow(); await checkRepoStatus(); } catch (e) { console.error(e); }
@@ -100,6 +133,15 @@ export default function Dashboard() {
             <RefreshCw size={15} className={isRefreshing ? "animate-spin" : ""} />
             {isRefreshing ? "Checking..." : "Refresh"}
           </button>
+          <button
+            onClick={handleDiagnose}
+            disabled={diagLoading}
+            title="Diagnose push issues"
+            className="btn-secondary flex items-center gap-1.5 text-sm"
+          >
+            <Bug size={14} className={diagLoading ? "animate-pulse" : ""} />
+            {diagLoading ? "..." : "Diagnose"}
+          </button>
         </div>
       </div>
 
@@ -132,6 +174,33 @@ export default function Dashboard() {
         <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-error/10 border border-error/20 text-sm mb-4">
           <AlertTriangle size={13} className="text-error" />
           <span className="text-error">{repoStatus.error}</span>
+        </div>
+      )}
+
+      {/* Diagnostic panel */}
+      {diag && (
+        <div className="card mb-4 border border-accent/20 bg-surface-alt text-xs font-mono">
+          <div className="flex items-center gap-2 mb-2">
+            <Bug size={13} className="text-accent" />
+            <span className="text-sm font-sans font-medium text-text">Push Diagnostic</span>
+            <button onClick={() => setDiag(null)} className="ml-auto text-text-dim hover:text-text">✕</button>
+          </div>
+          <div className="space-y-1 text-text-muted">
+            <div><span className="text-text">remote_url:</span> {diag.remote_url ?? "NOT SET"}</div>
+            <div><span className="text-text">token_found:</span> <span className={diag.token_found ? "text-success" : "text-error"}>{String(diag.token_found)}</span></div>
+            <div><span className="text-text">sync_repo_exists:</span> <span className={diag.sync_repo_exists ? "text-success" : "text-warning"}>{String(diag.sync_repo_exists)}</span> <span className="text-text-dim">({diag.sync_repo_path})</span></div>
+            <div><span className="text-text">remote_has_data:</span> {String(diag.remote_has_data)}</div>
+            <div><span className="text-text">head_commit:</span> {diag.head_commit ?? "no commits"}</div>
+            <div><span className="text-text">commits_ahead:</span> <span className={diag.commits_ahead > 0 ? "text-warning" : ""}>{diag.commits_ahead}</span></div>
+            <div><span className="text-text">tracked_files:</span> {diag.tracked_files_count}</div>
+            <div><span className="text-text">files_to_push:</span> <span className={diag.files_to_push.length > 0 ? "text-warning" : "text-success"}>{diag.files_to_push.length}</span></div>
+            {diag.files_to_push.length > 0 && (
+              <div className="ml-4 space-y-0.5">
+                {diag.files_to_push.map((f, i) => <div key={i} className="text-warning">+ {f}</div>)}
+              </div>
+            )}
+            {diag.error && <div className="text-error mt-1">error: {diag.error}</div>}
+          </div>
         </div>
       )}
 

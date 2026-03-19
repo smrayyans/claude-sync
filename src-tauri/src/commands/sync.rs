@@ -1,7 +1,23 @@
 use tauri::AppHandle;
+use serde::{Deserialize, Serialize};
 
 use crate::sync::{engine, FileChange, RepoStatus, SyncResult, SyncStatus};
 use crate::sync::machine::{read_machine_config, PullLogEntry};
+use crate::git::{auth, repo};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PushDiagnostic {
+    pub remote_url: Option<String>,
+    pub token_found: bool,
+    pub sync_repo_exists: bool,
+    pub sync_repo_path: String,
+    pub remote_has_data: bool,
+    pub head_commit: Option<String>,
+    pub commits_ahead: usize,
+    pub tracked_files_count: usize,
+    pub files_to_push: Vec<String>,
+    pub error: Option<String>,
+}
 
 #[tauri::command]
 pub async fn sync_now(app: AppHandle) -> Result<SyncResult, String> {
@@ -53,4 +69,101 @@ pub async fn get_pending_changes() -> Vec<FileChange> {
 #[tauri::command]
 pub async fn check_repo_status() -> RepoStatus {
     engine::check_repo_status().await
+}
+
+#[tauri::command]
+pub async fn diagnose_push() -> PushDiagnostic {
+    use crate::sync::conflict::hash_file;
+    use crate::sync::engine::{sync_repo_path, collect_tracked_files};
+    use crate::claude::claude_dir;
+
+    let config = match read_machine_config().await {
+        Ok(c) => c,
+        Err(e) => return PushDiagnostic {
+            remote_url: None, token_found: false, sync_repo_exists: false,
+            sync_repo_path: String::new(), remote_has_data: false,
+            head_commit: None, commits_ahead: 0, tracked_files_count: 0,
+            files_to_push: vec![], error: Some(format!("read_machine_config: {e}")),
+        },
+    };
+
+    let remote_url = config.remote_url.clone();
+    let token = remote_url.as_ref()
+        .and_then(|u| auth::get_token(u).ok())
+        .unwrap_or_default();
+    let token_found = !token.is_empty();
+
+    let sync_repo = sync_repo_path();
+    let sync_repo_exists = sync_repo.exists();
+    let sync_repo_path_str = sync_repo.display().to_string();
+
+    let repository = match remote_url.as_ref() {
+        None => return PushDiagnostic {
+            remote_url, token_found, sync_repo_exists,
+            sync_repo_path: sync_repo_path_str, remote_has_data: false,
+            head_commit: None, commits_ahead: 0, tracked_files_count: 0,
+            files_to_push: vec![], error: Some("No remote URL configured".into()),
+        },
+        Some(url) => {
+            if sync_repo_exists {
+                match repo::open_repo(&sync_repo) {
+                    Ok(r) => r,
+                    Err(e) => return PushDiagnostic {
+                        remote_url: Some(url.clone()), token_found, sync_repo_exists,
+                        sync_repo_path: sync_repo_path_str, remote_has_data: false,
+                        head_commit: None, commits_ahead: 0, tracked_files_count: 0,
+                        files_to_push: vec![], error: Some(format!("open_repo: {e}")),
+                    },
+                }
+            } else {
+                match repo::clone_repo(url, &sync_repo, &token) {
+                    Ok(r) => r,
+                    Err(e) => return PushDiagnostic {
+                        remote_url: Some(url.clone()), token_found, sync_repo_exists,
+                        sync_repo_path: sync_repo_path_str, remote_has_data: false,
+                        head_commit: None, commits_ahead: 0, tracked_files_count: 0,
+                        files_to_push: vec![], error: Some(format!("clone_repo: {e}")),
+                    },
+                }
+            }
+        }
+    };
+
+    let remote_has_data = repo::fetch(&repository, &token).unwrap_or(false);
+    if remote_has_data {
+        let _ = repo::pull_fast_forward(&repository);
+    }
+
+    let head_commit = repository.head().ok()
+        .and_then(|h| h.peel_to_commit().ok())
+        .map(|c| format!("{} — {}", &c.id().to_string()[..8], c.summary().unwrap_or("(no msg)")));
+
+    let commits_ahead = repo::count_ahead(&repository).unwrap_or(0);
+
+    let claude_dir = claude_dir();
+    let tracked_files = collect_tracked_files(&claude_dir);
+    let tracked_files_count = tracked_files.len();
+    let mut files_to_push = vec![];
+
+    for (file_key, local_path) in &tracked_files {
+        if !local_path.exists() { continue; }
+        let committed = repo::get_file_from_head(&repository, file_key);
+        let changed = match committed {
+            None => true,
+            Some(ref head_bytes) => std::fs::read(local_path).unwrap_or_default() != *head_bytes,
+        };
+        if changed {
+            files_to_push.push(format!("{} (local: {}b)",
+                file_key,
+                local_path.metadata().map(|m| m.len()).unwrap_or(0)
+            ));
+        }
+    }
+
+    PushDiagnostic {
+        remote_url, token_found, sync_repo_exists,
+        sync_repo_path: sync_repo_path_str, remote_has_data,
+        head_commit, commits_ahead, tracked_files_count,
+        files_to_push, error: None,
+    }
 }

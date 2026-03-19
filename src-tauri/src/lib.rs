@@ -40,6 +40,7 @@ pub fn run() {
             get_sync_status,
             get_pending_changes,
             check_repo_status,
+            diagnose_push,
             // Agent commands
             list_agents,
             get_agent,
