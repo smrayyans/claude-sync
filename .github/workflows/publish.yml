@@ -15,9 +15,7 @@ jobs:
       matrix:
         include:
           - platform: ubuntu-22.04
-            artifact_name: linux
           - platform: windows-latest
-            artifact_name: windows
 
     runs-on: ${{ matrix.platform }}
 
@@ -29,7 +27,6 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          registry-url: "https://registry.npmjs.org"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -55,52 +52,13 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Build and publish Tauri app
+      - name: Build and upload to GitHub Releases
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "claude-sync ${{ github.ref_name }}"
-          releaseBody: |
-            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+          releaseBody: "Download the AppImage (Linux) or .msi (Windows) below."
           releaseDraft: false
           prerelease: false
-
-      - name: Copy Linux binary to npm package
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          mkdir -p npm/claude-sync-linux-x64/bin
-          cp src-tauri/target/release/claude-sync npm/claude-sync-linux-x64/bin/claude-sync
-          chmod +x npm/claude-sync-linux-x64/bin/claude-sync
-
-      - name: Copy Windows binary to npm package
-        if: matrix.platform == 'windows-latest'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path npm/claude-sync-win32-x64/bin
-          Copy-Item src-tauri/target/release/claude-sync.exe npm/claude-sync-win32-x64/bin/claude-sync.exe
-
-      - name: Publish Linux npm package
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          cd npm/claude-sync-linux-x64
-          npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish Windows npm package
-        if: matrix.platform == 'windows-latest'
-        run: |
-          cd npm/claude-sync-win32-x64
-          npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish wrapper npm package (Linux only)
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          cd npm/claude-sync
-          npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
