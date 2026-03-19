@@ -137,9 +137,17 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
         let _ = repo::pull_fast_forward(&repository);
     }
 
-    // Collect local files to sync
+    // Collect local AND remote files (remote may have new files from other machines)
     let claude_dir = claude_dir();
-    let tracked_files = collect_tracked_files(&claude_dir);
+    let local_files = collect_tracked_files(&claude_dir);
+    let remote_files = collect_remote_files(&sync_repo, &claude_dir);
+    let mut all_files: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    for (key, path) in local_files {
+        all_files.insert(key, path);
+    }
+    for (key, path) in remote_files {
+        all_files.entry(key).or_insert(path);
+    }
 
     let mut files_pushed = vec![];
     let mut files_pulled = vec![];
@@ -147,7 +155,7 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
 
     let mut hashes = load_hashes();
 
-    for (file_key, local_path) in &tracked_files {
+    for (file_key, local_path) in &all_files {
         // Safe sync: wait for file to stabilize
         if local_path.exists() {
             wait_for_stable(local_path).await;
@@ -353,6 +361,41 @@ pub fn collect_tracked_files(claude_dir: &Path) -> Vec<(String, PathBuf)> {
     files
 }
 
+/// Scan the sync repo for files that should be pulled — covers files that
+/// exist on remote but not locally (new agents from another machine, etc.).
+pub fn collect_remote_files(sync_repo: &Path, claude_dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut files = vec![];
+
+    for entry in WalkDir::new(sync_repo)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        // Skip .git internals
+        if entry.path().to_string_lossy().contains("/.git/") || entry.path().to_string_lossy().contains("/.git") && entry.path() != sync_repo.join(".gitignore") {
+            continue;
+        }
+        if entry.file_name().to_string_lossy() == ".gitignore" {
+            continue;
+        }
+
+        if let Ok(rel) = entry.path().strip_prefix(sync_repo) {
+            let key = crate::claude::normalize_path(&rel.to_string_lossy());
+
+            // Skip excluded paths
+            let local_path = claude_dir.join(&key);
+            if is_excluded(&local_path, claude_dir) {
+                continue;
+            }
+
+            files.push((key, local_path));
+        }
+    }
+
+    files
+}
+
 pub fn get_sync_pull_log() -> Vec<PullLogEntry> {
     read_pull_log()
 }
@@ -406,11 +449,25 @@ pub async fn perform_pull(_app: &AppHandle) -> Result<SyncResult> {
     repo::pull_fast_forward(&repository)?;
 
     let claude_dir = claude_dir();
-    let tracked_files = collect_tracked_files(&claude_dir);
+
+    // Scan BOTH local files and sync repo files — the sync repo may have
+    // files that don't exist locally yet (new agents from another machine).
+    let local_files = collect_tracked_files(&claude_dir);
+    let remote_files = collect_remote_files(&sync_repo, &claude_dir);
+
+    // Merge into a deduplicated map (file_key → local_path)
+    let mut all_files: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    for (key, path) in local_files {
+        all_files.insert(key, path);
+    }
+    for (key, path) in remote_files {
+        all_files.entry(key).or_insert(path);
+    }
+
     let mut files_pulled = vec![];
     let mut hashes = load_hashes();
 
-    for (file_key, local_path) in &tracked_files {
+    for (file_key, local_path) in &all_files {
         let remote_path = sync_repo.join(file_key);
         if remote_path.exists() {
             let content = std::fs::read(&remote_path)?;
