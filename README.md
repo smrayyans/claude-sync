@@ -14,25 +14,28 @@ Keeps `agents/`, `skills/`, `projects/*/memory/`, `settings.json`, and **chat hi
 
 Download from [Releases](https://github.com/smrayyans/claude-sync/releases).
 
-### Linux
+### Linux (Debian/Ubuntu/Kali)
 
-Download the `.AppImage`, then run the installer:
+```bash
+curl -fsSL https://raw.githubusercontent.com/smrayyans/claude-sync/main/setup.sh | bash
+```
 
+That's it. Search **"Claude Sync"** in your app menu or run `claude-sync`.
+
+```bash
+sudo apt remove claude-sync    # uninstall
+```
+
+> **Update:** just run the install command again.
+
+<details>
+<summary>Alternative: AppImage (no root needed)</summary>
+
+Download `.AppImage` + `install.sh` from [Releases](https://github.com/smrayyans/claude-sync/releases), then:
 ```bash
 chmod +x install.sh && ./install.sh
 ```
-
-This installs the app system-wide — search **"Claude Sync"** from your app menu.
-
-> **Update:** download the new `.AppImage` and run `install.sh` again.
-> **Uninstall:** `chmod +x uninstall.sh && ./uninstall.sh`
-
-<details>
-<summary>Alternative: .deb package (Debian/Ubuntu/Kali)</summary>
-
-```bash
-sudo dpkg -i claude-sync_*.deb
-```
+Uninstall: `chmod +x uninstall.sh && ./uninstall.sh`
 </details>
 
 ### Windows
