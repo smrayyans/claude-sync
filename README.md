@@ -24,11 +24,47 @@ Keeps `agents/`, `skills/`, `projects/*/memory/`, `settings.json`, and **chat hi
 
 ---
 
+## Installation
+
+### Option A — AppImage (Linux, no install)
+
+Download the latest `.AppImage` from [Releases](https://github.com/smrayyans/claude-sync/releases), then:
+
+```bash
+chmod +x claude-sync_*.AppImage
+./claude-sync_*.AppImage
+```
+
+### Option B — .deb package (Debian/Ubuntu/Kali)
+
+```bash
+sudo dpkg -i claude-sync_*.deb
+claude-sync
+```
+
+### Option C — Build from source
+
+```bash
+# System deps (Debian/Ubuntu/Kali)
+sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+  libappindicator3-dev librsvg2-dev libsecret-1-dev patchelf
+
+# Rust + Node required
+PATH="$HOME/.cargo/bin:$PATH" npm run tauri build
+
+# Run the AppImage
+./src-tauri/target/release/bundle/appimage/claude-sync_*.AppImage
+```
+
+> Always use `npm run tauri build`, not bare `cargo build` — the Tauri CLI embeds the frontend into the binary.
+
+---
+
 ## Setup
 
 ### 1. Create a dedicated private repo on GitHub
 
-Go to `github.com/new` — name it `claude-data`, set **Private**. Do not reuse existing repos.
+Go to `github.com/new` — name it `claude-data`, set **Private**. Leave it completely empty (no README, no .gitignore). Do not reuse existing repos.
 
 ### 2. Generate a PAT
 
@@ -36,17 +72,15 @@ Go to `github.com/new` — name it `claude-data`, set **Private**. Do not reuse 
 
 ### 3. Run the setup wizard
 
-```bash
-./claude-sync 2>/dev/null
-```
+Launch the app — on first run the setup wizard opens automatically.
 
-Enter machine name, repo URL, PAT → test connection → initial pull → done.
+Enter machine name, repo URL (`https://github.com/you/claude-data`), PAT → test connection → done.
 
 ---
 
 ## Features
 
-**Dashboard** — Sync Now, last sync time, pending changes diff, online/offline status
+**Dashboard** — Sync Now / Pull / Push buttons, last sync time, pending changes diff, online/offline status, device pull history (who pulled last and when)
 
 **Agents** — Browse/create/edit agent `.md` files with Monaco editor, 5 built-in templates
 
@@ -101,22 +135,6 @@ When both machines change the same file before syncing, claude-sync detects it v
 Chat sessions (`.jsonl` files in `~/.claude/projects/`) are included in the sync. On a second machine, open the **Chats** tab to browse all past conversations pulled from the remote.
 
 > Sessions can get large. If the sync repo exceeds ~10MB, consider excluding specific project slugs by adding their paths to machine overrides.
-
----
-
-## Building from source
-
-```bash
-# System deps (Debian/Ubuntu/Kali)
-sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
-  libappindicator3-dev librsvg2-dev libsecret-1-dev patchelf
-
-# Rust + Node already required
-PATH="$HOME/.cargo/bin:$PATH" npm run tauri build
-# → src-tauri/target/release/bundle/{deb,rpm,appimage}
-```
-
-> Always use `npm run tauri build`, not bare `cargo build` — the tauri CLI runs the Vite build first and embeds the frontend into the binary.
 
 ---
 
