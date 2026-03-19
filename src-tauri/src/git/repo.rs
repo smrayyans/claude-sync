@@ -166,15 +166,23 @@ pub fn push(repo: &Repository, token: &str) -> Result<()> {
 }
 
 pub fn test_connection(url: &str, token: &str) -> bool {
-    // Try to list remote refs
-    let mut remote = match git2::Remote::create_detached(url) {
+    // Use a temp dir repo to test the connection
+    let tmp = std::env::temp_dir().join("claude-sync-test");
+    let _ = std::fs::create_dir_all(&tmp);
+
+    let repo = match Repository::init(&tmp) {
         Ok(r) => r,
         Err(_) => return false,
     };
 
-    remote.connect_auth(
-        git2::Direction::Fetch,
-        Some(build_callbacks(token)),
-        None,
-    ).is_ok()
+    let mut remote = match repo.remote_anonymous(url) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+
+    let callbacks = build_callbacks(token);
+    let mut fo = FetchOptions::new();
+    fo.remote_callbacks(callbacks);
+
+    remote.fetch(&[] as &[&str], Some(&mut fo), None).is_ok()
 }

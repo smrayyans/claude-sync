@@ -38,18 +38,21 @@ impl FileWatcher {
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
-                    let mut s = flush_state.lock().unwrap();
-                    let now = Instant::now();
-                    let ready: Vec<PathBuf> = s
-                        .pending
-                        .iter()
-                        .filter(|(_, t)| now.duration_since(**t).as_millis() >= DEBOUNCE_MS as u128)
-                        .map(|(p, _)| p.clone())
-                        .collect();
-
-                    for p in &ready {
-                        s.pending.remove(p);
-                    }
+                    let ready: Vec<PathBuf> = {
+                        let mut s = flush_state.lock().unwrap();
+                        let now = Instant::now();
+                        let ready: Vec<PathBuf> = s
+                            .pending
+                            .iter()
+                            .filter(|(_, t)| now.duration_since(**t).as_millis() >= DEBOUNCE_MS as u128)
+                            .map(|(p, _)| p.clone())
+                            .collect();
+                        for p in &ready {
+                            s.pending.remove(p);
+                        }
+                        ready
+                        // MutexGuard dropped here before any await
+                    };
 
                     if !ready.is_empty() {
                         let _ = flush_tx.send(ready).await;

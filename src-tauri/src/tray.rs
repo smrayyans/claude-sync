@@ -1,7 +1,7 @@
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    App, Manager, Result,
+    App, Emitter, Manager, Result,
 };
 
 pub fn setup_tray(app: &mut App) -> Result<()> {
