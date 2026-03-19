@@ -132,6 +132,11 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
     // Fetch remote — returns false (non-fatal) when remote is empty on first push
     let remote_has_data = repo::fetch(&repository, &token)?;
 
+    // Fast-forward sync repo to latest remote so our push is always clean
+    if remote_has_data {
+        let _ = repo::pull_fast_forward(&repository);
+    }
+
     // Collect local files to sync
     let claude_dir = claude_dir();
     let tracked_files = collect_tracked_files(&claude_dir);
@@ -479,6 +484,12 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
 
     // Non-fatal fetch (empty remote ok) — capture whether remote has data
     let remote_has_data = repo::fetch(&repository, &token).unwrap_or(false);
+
+    // Fast-forward local sync repo to remote before pushing, so our commit
+    // will always be a clean fast-forward push (no rejection).
+    if remote_has_data {
+        let _ = repo::pull_fast_forward(&repository);
+    }
 
     let claude_dir = claude_dir();
     let tracked_files = collect_tracked_files(&claude_dir);
