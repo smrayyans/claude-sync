@@ -25,6 +25,7 @@ chmod +x install.sh && ./install.sh
 This installs the app system-wide — search **"Claude Sync"** from your app menu.
 
 > **Update:** download the new `.AppImage` and run `install.sh` again.
+> **Uninstall:** `chmod +x uninstall.sh && ./uninstall.sh`
 
 <details>
 <summary>Alternative: .deb package (Debian/Ubuntu/Kali)</summary>
