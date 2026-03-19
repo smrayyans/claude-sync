@@ -482,11 +482,10 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
         repo::clone_repo(&remote_url, &sync_repo, &token)?
     };
 
-    // Non-fatal fetch (empty remote ok) — capture whether remote has data
+    // Non-fatal fetch (empty remote ok)
     let remote_has_data = repo::fetch(&repository, &token).unwrap_or(false);
 
-    // Fast-forward local sync repo to remote before pushing, so our commit
-    // will always be a clean fast-forward push (no rejection).
+    // Fast-forward sync repo to remote HEAD so new commit sits cleanly on top
     if remote_has_data {
         let _ = repo::pull_fast_forward(&repository);
     }
@@ -501,25 +500,25 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
             continue;
         }
 
-        let repo_path = sync_repo.join(file_key);
-
-        // Compare local vs what's actually in the sync repo (ground truth)
-        let changed = if !remote_has_data || !repo_path.exists() {
-            // Remote empty or file not in sync repo yet — push it
-            true
-        } else {
-            let local_hash = hash_file(local_path).unwrap_or_default();
-            let repo_hash = hash_file(&repo_path).unwrap_or_default();
-            local_hash != repo_hash
+        // Compare local content vs what is COMMITTED in git HEAD.
+        // Do NOT compare against working-directory files — a previous failed
+        // push may have copied the file there without committing it, causing
+        // the app to think "nothing changed" on the next push attempt.
+        let committed = repo::get_file_from_head(&repository, file_key);
+        let changed = match committed {
+            None => true, // not in HEAD → new file, always push
+            Some(ref head_bytes) => {
+                std::fs::read(local_path).unwrap_or_default() != *head_bytes
+            }
         };
 
         if changed {
+            let repo_path = sync_repo.join(file_key);
             if let Some(parent) = repo_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::copy(local_path, &repo_path)?;
-            let current_hash = hash_file(local_path).ok();
-            if let Some(hash) = current_hash {
+            if let Some(hash) = hash_file(local_path).ok() {
                 update_hash(&mut hashes, file_key, &hash);
             }
             files_pushed.push(file_key.clone());
@@ -546,19 +545,42 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
         let mut config = config;
         config.last_synced = Some(chrono::Utc::now().to_rfc3339());
         write_machine_config(&config).await?;
+
+        let n = files_pushed.len();
+        return Ok(SyncResult {
+            success: true,
+            files_pushed,
+            files_pulled: vec![],
+            conflicts: vec![],
+            message: format!("Pushed {} files to remote", n),
+        });
     }
 
-    let n_pushed = files_pushed.len();
+    // No new file changes — but maybe a previous push committed locally and
+    // failed before reaching GitHub. Push any local commits that are ahead.
+    let ahead = repo::count_ahead(&repository).unwrap_or(0);
+    if ahead > 0 {
+        repo::push(&repository, &token)?;
+
+        let mut config = config;
+        config.last_synced = Some(chrono::Utc::now().to_rfc3339());
+        write_machine_config(&config).await?;
+
+        return Ok(SyncResult {
+            success: true,
+            files_pushed: vec![],
+            files_pulled: vec![],
+            conflicts: vec![],
+            message: format!("Pushed {ahead} pending commit(s) to remote"),
+        });
+    }
+
     Ok(SyncResult {
         success: true,
-        files_pushed,
+        files_pushed: vec![],
         files_pulled: vec![],
         conflicts: vec![],
-        message: if n_pushed == 0 {
-            "Nothing to push — already up to date.".to_string()
-        } else {
-            format!("Pushed {} files to remote", n_pushed)
-        },
+        message: "Nothing to push — already up to date.".to_string(),
     })
 }
 

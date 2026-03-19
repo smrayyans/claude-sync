@@ -184,6 +184,30 @@ pub fn push(repo: &Repository, token: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read a file's content from the current HEAD commit.
+/// Returns None if repo has no commits or the file isn't in HEAD.
+pub fn get_file_from_head(repo: &Repository, file_key: &str) -> Option<Vec<u8>> {
+    let head = repo.head().ok()?.peel_to_tree().ok()?;
+    let entry = head.get_path(std::path::Path::new(file_key)).ok()?;
+    let blob = repo.find_blob(entry.id()).ok()?;
+    Some(blob.content().to_vec())
+}
+
+/// How many local commits are ahead of origin/main.
+pub fn count_ahead(repo: &Repository) -> Result<usize> {
+    let local = repo.head()?.peel_to_commit()?;
+    let remote = repo
+        .find_reference("refs/remotes/origin/main")
+        .and_then(|r| r.peel_to_commit());
+    match remote {
+        Ok(r) => {
+            let (ahead, _) = repo.graph_ahead_behind(local.id(), r.id())?;
+            Ok(ahead)
+        }
+        Err(_) => Ok(1), // No remote ref yet = we're ahead
+    }
+}
+
 pub fn test_connection(url: &str, token: &str) -> bool {
     let tmp = std::env::temp_dir().join("claude-sync-conn-test");
     let _ = std::fs::create_dir_all(&tmp);
