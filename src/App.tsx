@@ -4,6 +4,7 @@ import Layout from "./components/layout/Layout";
 import Dashboard from "./components/dashboard/Dashboard";
 import AgentList from "./components/agents/AgentList";
 import MemoryBrowser from "./components/memory/MemoryBrowser";
+import ChatHistory from "./components/chats/ChatHistory";
 import CommitHistory from "./components/history/CommitHistory";
 import Settings from "./components/settings/Settings";
 import SetupWizard from "./components/setup/SetupWizard";
@@ -54,6 +55,7 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/agents" element={<AgentList />} />
             <Route path="/memory" element={<MemoryBrowser />} />
+            <Route path="/chats" element={<ChatHistory />} />
             <Route path="/history" element={<CommitHistory />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="*" element={<Navigate to="/" replace />} />

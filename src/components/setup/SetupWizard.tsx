@@ -120,6 +120,7 @@ export default function SetupWizard() {
               <ul className="space-y-2">
                 {[
                   "Agents synced across machines",
+                  "Skills (slash commands) synced",
                   "Project memory preserved",
                   "Settings with machine-local overrides",
                   "Full conflict resolution UI",
@@ -153,6 +154,11 @@ export default function SetupWizard() {
           {/* Step 2: Remote */}
           {step === 2 && (
             <div className="space-y-3">
+              <div className="bg-surface-2 rounded-md p-3 text-xs text-text-muted space-y-1.5">
+                <p className="font-medium text-text">What repo does this need?</p>
+                <p>A <span className="text-accent">new private GitHub repo</span> dedicated to storing your Claude data — <span className="text-warning">not</span> your code repos or dotfiles.</p>
+                <p>Create one at <code className="text-accent">github.com/new</code>, name it something like <code className="text-accent">claude-data</code>, set it to <strong>Private</strong>.</p>
+              </div>
               <div>
                 <label className="block text-sm text-text-muted mb-1.5">
                   GitHub Repository URL
@@ -160,14 +166,14 @@ export default function SetupWizard() {
                 <input
                   type="url"
                   className="input"
-                  placeholder="https://github.com/you/claude-data"
+                  placeholder="https://github.com/yourusername/claude-data"
                   value={repoUrl}
                   onChange={(e) => setRepoUrl(e.target.value)}
                 />
               </div>
               <div>
                 <label className="block text-sm text-text-muted mb-1.5">
-                  Personal Access Token
+                  Personal Access Token (PAT)
                 </label>
                 <input
                   type="password"
@@ -177,7 +183,7 @@ export default function SetupWizard() {
                   onChange={(e) => setToken(e.target.value)}
                 />
                 <p className="text-xs text-text-dim mt-1">
-                  Needs <code className="text-accent">repo</code> scope. Stored in OS keychain.
+                  Go to <code className="text-accent">github.com → Settings → Developer settings → Personal access tokens → Tokens (classic)</code> → generate with <code className="text-accent">repo</code> scope. Stored in OS keychain, never on disk.
                 </p>
               </div>
               <button

@@ -5,6 +5,33 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomPaths {
+    /// Override for ~/.claude (the entire claude dir)
+    #[serde(rename = "claudeDir", skip_serializing_if = "Option::is_none")]
+    pub claude_dir: Option<String>,
+    /// Override for agents directory (default: <claudeDir>/agents)
+    #[serde(rename = "agentsDir", skip_serializing_if = "Option::is_none")]
+    pub agents_dir: Option<String>,
+    /// Override for skills directory (default: <claudeDir>/skills)
+    #[serde(rename = "skillsDir", skip_serializing_if = "Option::is_none")]
+    pub skills_dir: Option<String>,
+    /// Override for projects directory (default: <claudeDir>/projects)
+    #[serde(rename = "projectsDir", skip_serializing_if = "Option::is_none")]
+    pub projects_dir: Option<String>,
+}
+
+impl Default for CustomPaths {
+    fn default() -> Self {
+        Self {
+            claude_dir: None,
+            agents_dir: None,
+            skills_dir: None,
+            projects_dir: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MachineConfig {
     #[serde(rename = "machineId")]
     pub machine_id: String,
@@ -18,6 +45,8 @@ pub struct MachineConfig {
     pub machine_overrides: Vec<String>,
     #[serde(rename = "lastSynced")]
     pub last_synced: Option<String>,
+    #[serde(rename = "customPaths", default)]
+    pub custom_paths: CustomPaths,
 }
 
 impl Default for MachineConfig {
@@ -33,6 +62,7 @@ impl Default for MachineConfig {
             auto_sync_interval: 15,
             machine_overrides: vec![],
             last_synced: None,
+            custom_paths: CustomPaths::default(),
         }
     }
 }

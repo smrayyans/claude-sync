@@ -1,8 +1,9 @@
 import { useState } from "react";
 import RemoteConfig from "./RemoteConfig";
 import MachineSettings from "./MachineSettings";
+import PathSettings from "./PathSettings";
 
-const tabs = ["Remote", "Machine"] as const;
+const tabs = ["Remote", "Machine", "Paths"] as const;
 type Tab = (typeof tabs)[number];
 
 export default function Settings() {
@@ -33,6 +34,7 @@ export default function Settings() {
 
       {activeTab === "Remote" && <RemoteConfig />}
       {activeTab === "Machine" && <MachineSettings />}
+      {activeTab === "Paths" && <PathSettings />}
     </div>
   );
 }

@@ -3,6 +3,7 @@ import {
   LayoutDashboard,
   Bot,
   Brain,
+  MessageSquare,
   GitCommit,
   Settings,
   RefreshCw,
@@ -17,7 +18,8 @@ const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/agents", icon: Bot, label: "Agents" },
   { to: "/memory", icon: Brain, label: "Memory" },
-  { to: "/history", icon: GitCommit, label: "History" },
+  { to: "/chats", icon: MessageSquare, label: "Chats" },
+  { to: "/history", icon: GitCommit, label: "Sync Log" },
   { to: "/settings", icon: Settings, label: "Settings" },
 ];
 

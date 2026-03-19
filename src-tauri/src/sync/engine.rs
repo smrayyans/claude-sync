@@ -4,7 +4,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use walkdir::WalkDir;
 
-use crate::claude::{agents_dir, claude_dir, projects_dir};
+use crate::claude::{agents_dir, claude_dir, projects_dir, skills_dir};
 use crate::git::{auth, repo};
 use crate::sync::{
     conflict::{
@@ -196,9 +196,10 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
             .join("\n");
 
         let message = format!(
-            "[{}] sync: agents({}) memory({}) settings\n\nChanged:\n{}",
+            "[{}] sync: agents({}) skills({}) memory({}) settings\n\nChanged:\n{}",
             config.machine_name,
             files_pushed.iter().filter(|f| f.starts_with("agents/")).count(),
+            files_pushed.iter().filter(|f| f.starts_with("skills/")).count(),
             files_pushed.iter().filter(|f| f.starts_with("memory/")).count(),
             changed_list
         );
@@ -250,6 +251,49 @@ pub fn collect_tracked_files(claude_dir: &Path) -> Vec<(String, PathBuf)> {
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
+        {
+            if is_excluded(entry.path(), claude_dir) {
+                continue;
+            }
+            if let Ok(rel) = entry.path().strip_prefix(claude_dir) {
+                let key = crate::claude::normalize_path(&rel.to_string_lossy());
+                files.push((key, entry.path().to_path_buf()));
+            }
+        }
+    }
+
+    // skills/  (user-invocable slash commands)
+    let skills_dir = skills_dir();
+    if skills_dir.exists() {
+        for entry in WalkDir::new(&skills_dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            if is_excluded(entry.path(), claude_dir) {
+                continue;
+            }
+            if let Ok(rel) = entry.path().strip_prefix(claude_dir) {
+                let key = crate::claude::normalize_path(&rel.to_string_lossy());
+                files.push((key, entry.path().to_path_buf()));
+            }
+        }
+    }
+
+    // projects/*/*.jsonl  (chat sessions — sync the JSONL files)
+    let projects_dir_for_history = projects_dir();
+    if projects_dir_for_history.exists() {
+        for entry in WalkDir::new(&projects_dir_for_history)
+            .max_depth(2)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().is_file()
+                    && e.path().extension().map_or(false, |ext| ext == "jsonl")
+                    && !e.path().to_string_lossy().contains("/subagents/")
+            })
         {
             if is_excluded(entry.path(), claude_dir) {
                 continue;

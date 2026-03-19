@@ -4,7 +4,7 @@ mod git;
 mod sync;
 mod tray;
 
-use commands::{agents::*, git::*, memory::*, settings::*, sync::*};
+use commands::{agents::*, git::*, history::*, memory::*, settings::*, sync::*};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -20,8 +20,9 @@ pub fn run() {
             // Initialize machine config on first run
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = sync::machine::ensure_machine_config().await {
-                    log::error!("Failed to initialize machine config: {e}");
+                match sync::machine::ensure_machine_config().await {
+                    Ok(config) => claude::apply_custom_paths(&config),
+                    Err(e) => log::error!("Failed to initialize machine config: {e}"),
                 }
 
                 // Start auto-sync timer
@@ -50,7 +51,10 @@ pub fn run() {
             save_memory_file,
             delete_memory_file,
             get_project_memories,
-            // History & conflict commands
+            // Chat history commands
+            list_chat_sessions,
+            get_chat_messages,
+            // Sync history & conflict commands
             get_commit_history,
             get_commit_diff,
             resolve_conflict,

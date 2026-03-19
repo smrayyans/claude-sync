@@ -1,6 +1,13 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 
+export interface CustomPaths {
+  claudeDir?: string;
+  agentsDir?: string;
+  skillsDir?: string;
+  projectsDir?: string;
+}
+
 export interface MachineConfig {
   machineId: string;
   machineName: string;
@@ -8,6 +15,7 @@ export interface MachineConfig {
   autoSyncInterval: number;
   machineOverrides: string[];
   lastSynced?: string;
+  customPaths: CustomPaths;
 }
 
 export interface AppSettings {
