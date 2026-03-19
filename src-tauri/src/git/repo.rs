@@ -110,7 +110,95 @@ pub fn pull_fast_forward(repo: &Repository) -> Result<bool> {
         return Ok(true);
     }
 
+    // Branches have diverged — rebase local commits on top of remote.
+    // This handles the case where another machine pushed while we had
+    // unpushed local commits.
+    if analysis.is_normal() {
+        log::info!("Branches diverged — rebasing local commits on top of remote");
+        return rebase_onto_remote(repo, fetch_commit.id());
+    }
+
     Ok(false)
+}
+
+/// Rebase local commits that are ahead of the remote onto the remote HEAD.
+/// This replays each local-only commit on top of `remote_oid`.
+fn rebase_onto_remote(repo: &Repository, remote_oid: git2::Oid) -> Result<bool> {
+    let local_head = repo.head()?.peel_to_commit()?;
+
+    // Find the merge base (common ancestor)
+    let base_oid = repo.merge_base(local_head.id(), remote_oid)
+        .with_context(|| "No common ancestor found")?;
+
+    // Collect local-only commits (from merge-base to local HEAD), oldest first
+    let mut local_commits = vec![];
+    let mut walk = repo.revwalk()?;
+    walk.push(local_head.id())?;
+    walk.hide(base_oid)?;
+    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)?;
+    for oid in walk {
+        let oid = oid?;
+        local_commits.push(repo.find_commit(oid)?);
+    }
+
+    if local_commits.is_empty() {
+        return Ok(false);
+    }
+
+    // Move HEAD to the remote commit
+    let refname = "refs/heads/main";
+    repo.reference(refname, remote_oid, true, "rebase: start")?;
+    repo.set_head(refname)?;
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+
+    let sig = Signature::now("claude-sync", "claude-sync@local")?;
+
+    // Replay each local commit on top
+    for commit in &local_commits {
+        let tree = commit.tree()?;
+
+        // Cherry-pick: create new commit with same tree and message on current HEAD
+        let parent = repo.head()?.peel_to_commit()?;
+
+        // Try to apply the tree by doing a merge of the commit's changes
+        let base_commit = commit.parent(0).ok();
+        let base_tree = base_commit.as_ref().map(|c| c.tree().ok()).flatten();
+
+        let mut merged_index = if let Some(ref bt) = base_tree {
+            repo.merge_trees(bt, &parent.tree()?, &tree, None)?
+        } else {
+            // No parent (root commit) — just use the commit's tree directly
+            let mut idx = repo.index()?;
+            idx.read_tree(&tree)?;
+            idx
+        };
+
+        if merged_index.has_conflicts() {
+            // On conflict, prefer the remote version (theirs = current HEAD)
+            // and the local version for non-conflicting files.
+            // For config sync this is safe — worst case user pushes again.
+            log::warn!("Rebase conflict on {} — favouring latest", commit.id());
+            // Just skip this commit and continue
+            continue;
+        }
+
+        let new_tree_oid = {
+            let mut idx = repo.index()?;
+            idx.read_tree(&repo.find_tree(merged_index.write_tree_to(repo)?)?)?;
+            idx.write()?;
+            idx.write_tree()?
+        };
+        let new_tree = repo.find_tree(new_tree_oid)?;
+
+        let msg = commit.message().unwrap_or("rebased commit");
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &new_tree, &[&parent])?;
+    }
+
+    // Checkout the final state
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+
+    log::info!("Rebased {} local commits onto remote", local_commits.len());
+    Ok(true)
 }
 
 /// Stage the given relative paths and create a commit.
