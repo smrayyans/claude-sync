@@ -7,11 +7,15 @@ mod tray;
 use commands::{agents::*, git::*, history::*, memory::*, settings::*, sync::*};
 use tauri::Manager;
 
+/// Global mutex preventing concurrent sync/push/pull operations
+pub struct SyncLock(pub tokio::sync::Mutex<()>);
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     env_logger::init();
 
     tauri::Builder::default()
+        .manage(SyncLock(tokio::sync::Mutex::new(())))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {

@@ -1,6 +1,7 @@
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use serde::{Deserialize, Serialize};
 
+use crate::SyncLock;
 use crate::sync::{engine, FileChange, RepoStatus, SyncResult, SyncStatus};
 use crate::sync::machine::{read_machine_config, PullLogEntry};
 use crate::git::{auth, repo};
@@ -21,6 +22,8 @@ pub struct PushDiagnostic {
 
 #[tauri::command]
 pub async fn sync_now(app: AppHandle) -> Result<SyncResult, String> {
+    let lock = app.state::<SyncLock>();
+    let _guard = lock.0.lock().await;
     engine::perform_sync(&app)
         .await
         .map_err(|e| e.to_string())
@@ -28,6 +31,8 @@ pub async fn sync_now(app: AppHandle) -> Result<SyncResult, String> {
 
 #[tauri::command]
 pub async fn sync_pull(app: AppHandle) -> Result<SyncResult, String> {
+    let lock = app.state::<SyncLock>();
+    let _guard = lock.0.lock().await;
     engine::perform_pull(&app)
         .await
         .map_err(|e| e.to_string())
@@ -35,6 +40,8 @@ pub async fn sync_pull(app: AppHandle) -> Result<SyncResult, String> {
 
 #[tauri::command]
 pub async fn sync_push(app: AppHandle) -> Result<SyncResult, String> {
+    let lock = app.state::<SyncLock>();
+    let _guard = lock.0.lock().await;
     engine::perform_push(&app)
         .await
         .map_err(|e| e.to_string())

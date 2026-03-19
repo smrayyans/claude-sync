@@ -29,10 +29,13 @@ const EXCLUDED_PATHS: &[&str] = &[
 
 fn is_excluded(path: &Path, claude_dir: &Path) -> bool {
     if let Ok(rel) = path.strip_prefix(claude_dir) {
-        let rel_str = rel.to_string_lossy();
-        for excluded in EXCLUDED_PATHS {
-            if rel_str.starts_with(excluded) || rel_str.contains(excluded) {
-                return true;
+        // Check if any path component matches an excluded name
+        for component in rel.components() {
+            let name = component.as_os_str().to_string_lossy();
+            for excluded in EXCLUDED_PATHS {
+                if name == *excluded {
+                    return true;
+                }
             }
         }
     }
@@ -47,14 +50,13 @@ pub fn sync_repo_path() -> PathBuf {
 }
 
 pub async fn start_auto_sync(app: AppHandle) {
-    let config = read_machine_config().await.unwrap_or_default();
-    let interval = Duration::from_secs(config.auto_sync_interval * 60);
-
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(interval).await;
+            // Re-read config each iteration so interval/name changes take effect
+            let config = read_machine_config().await.unwrap_or_default();
+            let secs = std::cmp::max(config.auto_sync_interval, 1) * 60;
+            tokio::time::sleep(Duration::from_secs(secs)).await;
 
-            // Connectivity check
             if !check_online().await {
                 let _ = app.emit("sync-status", SyncStatus {
                     pending_changes: 0,
@@ -134,7 +136,7 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
 
     // Fast-forward sync repo to latest remote so our push is always clean
     if remote_has_data {
-        let _ = repo::pull_fast_forward(&repository);
+        repo::pull_fast_forward(&repository)?;
     }
 
     // Collect local AND remote files (remote may have new files from other machines)
@@ -265,7 +267,9 @@ pub fn collect_tracked_files(claude_dir: &Path) -> Vec<(String, PathBuf)> {
 
     // settings.json
     let settings = claude_dir.join("settings.json");
-    files.push(("settings.json".to_string(), settings));
+    if settings.exists() {
+        files.push(("settings.json".to_string(), settings));
+    }
 
     // agents/
     let agents_dir = agents_dir();
@@ -372,8 +376,8 @@ pub fn collect_remote_files(sync_repo: &Path, claude_dir: &Path) -> Vec<(String,
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
     {
-        // Skip .git internals
-        if entry.path().to_string_lossy().contains("/.git/") || entry.path().to_string_lossy().contains("/.git") && entry.path() != sync_repo.join(".gitignore") {
+        // Skip .git directory and .gitignore
+        if entry.path().components().any(|c| c.as_os_str() == ".git") {
             continue;
         }
         if entry.file_name().to_string_lossy() == ".gitignore" {
@@ -544,7 +548,7 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
 
     // Fast-forward sync repo to remote HEAD so new commit sits cleanly on top
     if remote_has_data {
-        let _ = repo::pull_fast_forward(&repository);
+        repo::pull_fast_forward(&repository)?;
     }
 
     let claude_dir = claude_dir();
@@ -580,7 +584,10 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
         }
     }
 
-    // Detect files deleted locally but still in git HEAD
+    // Detect files deleted locally but still in git HEAD.
+    // ONLY delete if the file was previously known to this machine (exists in
+    // hashes.json), so we don't accidentally delete files from other machines
+    // that we haven't pulled yet.
     if let Ok(head) = repository.head().and_then(|h| h.peel_to_tree()) {
         head.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
             if entry.kind() != Some(git2::ObjectType::Blob) {
@@ -591,13 +598,13 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
             } else {
                 format!("{}{}", dir, entry.name().unwrap_or(""))
             };
-            // Skip .gitignore
             if file_key == ".gitignore" {
                 return git2::TreeWalkResult::Ok;
             }
             let local_path = claude_dir.join(&file_key);
-            if !local_path.exists() {
-                // File in HEAD but deleted locally — remove from sync repo
+            let was_known = hashes.hashes.contains_key(&file_key);
+            if !local_path.exists() && was_known {
+                // File was synced to this machine before and is now deleted locally
                 let repo_path = sync_repo.join(&file_key);
                 let _ = std::fs::remove_file(&repo_path);
                 hashes.hashes.remove(&file_key);

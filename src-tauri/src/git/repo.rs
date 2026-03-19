@@ -174,11 +174,10 @@ fn rebase_onto_remote(repo: &Repository, remote_oid: git2::Oid) -> Result<bool> 
         };
 
         if merged_index.has_conflicts() {
-            // On conflict, prefer the remote version (theirs = current HEAD)
-            // and the local version for non-conflicting files.
-            // For config sync this is safe — worst case user pushes again.
-            log::warn!("Rebase conflict on {} — favouring latest", commit.id());
-            // Just skip this commit and continue
+            // Conflict: save the dropped commit as a backup branch so it's not lost
+            let backup_ref = format!("refs/heads/backup-{}", &commit.id().to_string()[..8]);
+            let _ = repo.reference(&backup_ref, commit.id(), true, "rebase conflict backup");
+            log::warn!("Rebase conflict on {} — saved to {}, skipping", commit.id(), backup_ref);
             continue;
         }
 
@@ -298,6 +297,7 @@ pub fn count_ahead(repo: &Repository) -> Result<usize> {
 
 pub fn test_connection(url: &str, token: &str) -> bool {
     let tmp = std::env::temp_dir().join("claude-sync-conn-test");
+    let _ = std::fs::remove_dir_all(&tmp);
     let _ = std::fs::create_dir_all(&tmp);
     let repo = match Repository::init(&tmp) {
         Ok(r) => r,
@@ -309,6 +309,7 @@ pub fn test_connection(url: &str, token: &str) -> bool {
     };
     let mut fo = FetchOptions::new();
     fo.remote_callbacks(build_callbacks(token));
-    // Fetching empty refs list just tests auth + reachability
-    remote.fetch(&[] as &[&str], Some(&mut fo), None).is_ok()
+    let result = remote.fetch(&[] as &[&str], Some(&mut fo), None).is_ok();
+    let _ = std::fs::remove_dir_all(&tmp);
+    result
 }
