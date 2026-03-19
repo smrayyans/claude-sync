@@ -24,16 +24,40 @@ export interface SyncResult {
   message: string;
 }
 
+export interface PullLogEntry {
+  machineName: string;
+  machineId: string;
+  timestamp: string;
+}
+
 interface SyncStore {
   status: SyncStatus | null;
   pendingChanges: FileChange[];
   isSyncing: boolean;
   lastResult: SyncResult | null;
+  pullLog: PullLogEntry[];
   setStatus: (status: SyncStatus) => void;
   setIsSyncing: (val: boolean) => void;
   refreshStatus: () => Promise<void>;
   refreshPending: () => Promise<void>;
+  refreshPullLog: () => Promise<void>;
   syncNow: () => Promise<SyncResult>;
+  pullNow: () => Promise<SyncResult>;
+  pushNow: () => Promise<SyncResult>;
+}
+
+async function invokeSync(command: string): Promise<SyncResult> {
+  try {
+    return await invoke<SyncResult>(command);
+  } catch (err) {
+    return {
+      success: false,
+      files_pushed: [],
+      files_pulled: [],
+      conflicts: [],
+      message: String(err),
+    };
+  }
 }
 
 export const useSyncStore = create<SyncStore>((set, get) => ({
@@ -41,6 +65,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   pendingChanges: [],
   isSyncing: false,
   lastResult: null,
+  pullLog: [],
 
   setStatus: (status) => set({ status }),
   setIsSyncing: (isSyncing) => set({ isSyncing }),
@@ -55,17 +80,36 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     set({ pendingChanges });
   },
 
+  refreshPullLog: async () => {
+    const pullLog = await invoke<PullLogEntry[]>("get_pull_log");
+    set({ pullLog });
+  },
+
   syncNow: async () => {
     set({ isSyncing: true });
-    try {
-      const result = await invoke<SyncResult>("sync_now");
-      set({ lastResult: result, isSyncing: false });
-      await get().refreshStatus();
-      await get().refreshPending();
-      return result;
-    } catch (err) {
-      set({ isSyncing: false });
-      throw err;
-    }
+    const result = await invokeSync("sync_now");
+    set({ lastResult: result, isSyncing: false });
+    await get().refreshStatus();
+    await get().refreshPending();
+    return result;
+  },
+
+  pullNow: async () => {
+    set({ isSyncing: true });
+    const result = await invokeSync("sync_pull");
+    set({ lastResult: result, isSyncing: false });
+    await get().refreshStatus();
+    await get().refreshPending();
+    await get().refreshPullLog();
+    return result;
+  },
+
+  pushNow: async () => {
+    set({ isSyncing: true });
+    const result = await invokeSync("sync_push");
+    set({ lastResult: result, isSyncing: false });
+    await get().refreshStatus();
+    await get().refreshPending();
+    return result;
   },
 }));

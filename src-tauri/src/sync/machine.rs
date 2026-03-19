@@ -5,6 +5,42 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PullLogEntry {
+    #[serde(rename = "machineName")]
+    pub machine_name: String,
+    #[serde(rename = "machineId")]
+    pub machine_id: String,
+    pub timestamp: String,
+}
+
+pub fn pull_log_path() -> PathBuf {
+    config_dir().join("pull-log.json")
+}
+
+pub fn read_pull_log() -> Vec<PullLogEntry> {
+    let path = pull_log_path();
+    if !path.exists() {
+        return vec![];
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn append_pull_log(entry: PullLogEntry) {
+    let mut log = read_pull_log();
+    log.push(entry);
+    if log.len() > 50 {
+        log.drain(0..log.len() - 50);
+    }
+    let path = pull_log_path();
+    if let Ok(json) = serde_json::to_string_pretty(&log) {
+        let _ = fs::write(&path, json);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomPaths {
     /// Override for ~/.claude (the entire claude dir)
     #[serde(rename = "claudeDir", skip_serializing_if = "Option::is_none")]

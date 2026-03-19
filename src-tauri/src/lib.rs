@@ -36,6 +36,7 @@ pub fn run() {
             sync_now,
             sync_pull,
             sync_push,
+            get_pull_log,
             get_sync_status,
             get_pending_changes,
             // Agent commands

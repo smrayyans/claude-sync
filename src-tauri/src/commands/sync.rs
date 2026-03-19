@@ -1,8 +1,7 @@
 use tauri::AppHandle;
 
 use crate::sync::{engine, FileChange, SyncResult, SyncStatus};
-use crate::sync::conflict::Resolution;
-use crate::sync::machine::read_machine_config;
+use crate::sync::machine::{read_machine_config, PullLogEntry};
 
 #[tauri::command]
 pub async fn sync_now(app: AppHandle) -> Result<SyncResult, String> {
@@ -13,13 +12,21 @@ pub async fn sync_now(app: AppHandle) -> Result<SyncResult, String> {
 
 #[tauri::command]
 pub async fn sync_pull(app: AppHandle) -> Result<SyncResult, String> {
-    // Pull-only: fetch + apply remote changes
-    sync_now(app).await
+    engine::perform_pull(&app)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn sync_push(app: AppHandle) -> Result<SyncResult, String> {
-    sync_now(app).await
+    engine::perform_push(&app)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_pull_log() -> Vec<PullLogEntry> {
+    engine::get_sync_pull_log()
 }
 
 #[tauri::command]

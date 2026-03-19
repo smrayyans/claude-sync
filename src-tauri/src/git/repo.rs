@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use git2::{FetchOptions, PushOptions, Repository, Signature};
+use git2::{ErrorCode, FetchOptions, PushOptions, Repository, Signature};
 use std::path::Path;
 
 use super::auth::build_callbacks;
@@ -9,61 +9,71 @@ pub fn open_repo(path: &Path) -> Result<Repository> {
 }
 
 pub fn clone_repo(url: &str, path: &Path, token: &str) -> Result<Repository> {
-    let mut callbacks = build_callbacks(token);
     let mut fo = FetchOptions::new();
-    fo.remote_callbacks(callbacks);
+    fo.remote_callbacks(build_callbacks(token));
 
     let mut builder = git2::build::RepoBuilder::new();
     builder.fetch_options(fo);
 
-    // Initialize empty repo if remote is empty
-    if let Ok(repo) = builder.clone(url, path) {
-        return Ok(repo);
+    match builder.clone(url, path) {
+        Ok(repo) => Ok(repo),
+        Err(_) => {
+            // Remote is empty or unreachable — init locally and set remote
+            init_repo(path, url)
+        }
     }
-
-    // Fallback: init local repo
-    init_repo(path, url, token)
 }
 
-pub fn init_repo(path: &Path, remote_url: &str, _token: &str) -> Result<Repository> {
+fn init_repo(path: &Path, remote_url: &str) -> Result<Repository> {
     std::fs::create_dir_all(path)?;
     let repo = Repository::init(path)
         .with_context(|| format!("Failed to init repo at {}", path.display()))?;
 
-    // Write .gitignore
-    write_gitignore(path)?;
+    // Explicitly set HEAD to main (git default is often master)
+    repo.set_head("refs/heads/main")?;
 
     // Set remote
     repo.remote("origin", remote_url)
         .with_context(|| "Failed to set remote")?;
 
+    // Write .gitignore
+    write_gitignore(path)?;
+
     Ok(repo)
 }
 
 fn write_gitignore(repo_path: &Path) -> Result<()> {
-    let gitignore = repo_path.join(".gitignore");
-    let content = "# claude-sync managed — do not remove\n\
-        .DS_Store\n\
-        *.tmp\n\
-        *.bak\n";
-    std::fs::write(gitignore, content)?;
+    let content = "# claude-sync managed\n.DS_Store\n*.tmp\n*.bak\n";
+    std::fs::write(repo_path.join(".gitignore"), content)?;
     Ok(())
 }
 
-pub fn fetch(repo: &Repository, token: &str) -> Result<()> {
-    let callbacks = build_callbacks(token);
+/// Fetch from remote. Returns false (non-fatal) if remote is empty (first push scenario).
+pub fn fetch(repo: &Repository, token: &str) -> Result<bool> {
     let mut fo = FetchOptions::new();
-    fo.remote_callbacks(callbacks);
+    fo.remote_callbacks(build_callbacks(token));
 
     let mut remote = repo
         .find_remote("origin")
         .with_context(|| "No remote 'origin' found")?;
 
-    remote
-        .fetch(&["main"], Some(&mut fo), None)
-        .with_context(|| "Failed to fetch from remote")?;
+    match remote.fetch(&["refs/heads/main:refs/remotes/origin/main"], Some(&mut fo), None) {
+        Ok(_) => Ok(true),
+        Err(e) if is_empty_remote_error(&e) => {
+            log::info!("Remote is empty (first push) — skipping fetch");
+            Ok(false)
+        }
+        Err(e) => Err(e).with_context(|| "Failed to fetch from remote"),
+    }
+}
 
-    Ok(())
+fn is_empty_remote_error(e: &git2::Error) -> bool {
+    let msg = e.message();
+    e.code() == ErrorCode::NotFound
+        || msg.contains("Couldn't find remote ref")
+        || msg.contains("not found")
+        || msg.contains("empty")
+        || msg.contains("no such ref")
 }
 
 pub fn pull_fast_forward(repo: &Repository) -> Result<bool> {
@@ -72,13 +82,18 @@ pub fn pull_fast_forward(repo: &Repository) -> Result<bool> {
         Err(_) => return Ok(false),
     };
 
-    let fetch_commit = repo
-        .reference_to_annotated_commit(&fetch_head)
-        .with_context(|| "Failed to get annotated commit from FETCH_HEAD")?;
+    let fetch_commit = match repo.reference_to_annotated_commit(&fetch_head) {
+        Ok(c) => c,
+        Err(_) => return Ok(false),
+    };
 
     let (analysis, _) = repo
         .merge_analysis(&[&fetch_commit])
         .with_context(|| "Merge analysis failed")?;
+
+    if analysis.is_up_to_date() {
+        return Ok(false);
+    }
 
     if analysis.is_fast_forward() {
         let refname = "refs/heads/main";
@@ -87,12 +102,7 @@ pub fn pull_fast_forward(repo: &Repository) -> Result<bool> {
                 r.set_target(fetch_commit.id(), "Fast-forward")?;
             }
             Err(_) => {
-                repo.reference(
-                    refname,
-                    fetch_commit.id(),
-                    true,
-                    "Setting main to fetch head",
-                )?;
+                repo.reference(refname, fetch_commit.id(), true, "Setting main")?;
             }
         }
         repo.set_head(refname)?;
@@ -100,45 +110,49 @@ pub fn pull_fast_forward(repo: &Repository) -> Result<bool> {
         return Ok(true);
     }
 
-    if analysis.is_up_to_date() {
-        return Ok(false);
-    }
-
     Ok(false)
 }
 
+/// Stage the given relative paths and create a commit.
+/// `files` are paths relative to the sync repo workdir (e.g. "agents/foo.md").
 pub fn stage_and_commit(repo: &Repository, files: &[String], message: &str) -> Result<()> {
+    // git2's Index::add_path requires paths relative to the repo workdir.
+    // We need to make sure the repo workdir is set correctly.
+    let workdir = repo.workdir()
+        .with_context(|| "Repo has no workdir (bare repo?)")?
+        .to_path_buf();
+
     let mut index = repo.index().with_context(|| "Failed to get index")?;
 
-    for file in files {
-        let path = Path::new(file);
-        if path.exists() {
+    for file_key in files {
+        let abs = workdir.join(file_key);
+        if abs.exists() {
+            let rel = Path::new(file_key);
             index
-                .add_path(path)
-                .with_context(|| format!("Failed to stage: {file}"))?;
+                .add_path(rel)
+                .with_context(|| format!("Failed to stage: {file_key}"))?;
         } else {
-            let _ = index.remove_path(path);
+            let _ = index.remove_path(Path::new(file_key));
         }
     }
 
-    // Also add .gitignore
-    let gitignore = Path::new(".gitignore");
-    if gitignore.exists() {
-        let _ = index.add_path(gitignore);
+    // Also stage .gitignore
+    let gitignore_abs = workdir.join(".gitignore");
+    if gitignore_abs.exists() {
+        let _ = index.add_path(Path::new(".gitignore"));
     }
 
     index.write()?;
-    let oid = index.write_tree()?;
-    let tree = repo.find_tree(oid)?;
+    let tree_oid = index.write_tree()?;
+    let tree = repo.find_tree(tree_oid)?;
 
     let sig = Signature::now("claude-sync", "claude-sync@local")?;
 
     let parent_commit = match repo.head() {
-        Ok(head) => {
-            let commit = head.peel_to_commit()?;
-            Some(commit)
+        Ok(head) if !head.is_branch() || head.target().is_some() => {
+            head.peel_to_commit().ok()
         }
-        Err(_) => None,
+        _ => None,
     };
 
     let parents: Vec<&git2::Commit> = parent_commit.iter().collect();
@@ -146,13 +160,18 @@ pub fn stage_and_commit(repo: &Repository, files: &[String], message: &str) -> R
     repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
         .with_context(|| "Failed to create commit")?;
 
+    // Ensure HEAD points to main
+    let head_ok = repo.head().map(|h| h.shorthand() == Some("main")).unwrap_or(false);
+    if !head_ok {
+        repo.set_head("refs/heads/main")?;
+    }
+
     Ok(())
 }
 
 pub fn push(repo: &Repository, token: &str) -> Result<()> {
-    let callbacks = build_callbacks(token);
     let mut po = PushOptions::new();
-    po.remote_callbacks(callbacks);
+    po.remote_callbacks(build_callbacks(token));
 
     let mut remote = repo
         .find_remote("origin")
@@ -166,23 +185,18 @@ pub fn push(repo: &Repository, token: &str) -> Result<()> {
 }
 
 pub fn test_connection(url: &str, token: &str) -> bool {
-    // Use a temp dir repo to test the connection
-    let tmp = std::env::temp_dir().join("claude-sync-test");
+    let tmp = std::env::temp_dir().join("claude-sync-conn-test");
     let _ = std::fs::create_dir_all(&tmp);
-
     let repo = match Repository::init(&tmp) {
         Ok(r) => r,
         Err(_) => return false,
     };
-
     let mut remote = match repo.remote_anonymous(url) {
         Ok(r) => r,
         Err(_) => return false,
     };
-
-    let callbacks = build_callbacks(token);
     let mut fo = FetchOptions::new();
-    fo.remote_callbacks(callbacks);
-
+    fo.remote_callbacks(build_callbacks(token));
+    // Fetching empty refs list just tests auth + reachability
     remote.fetch(&[] as &[&str], Some(&mut fo), None).is_ok()
 }

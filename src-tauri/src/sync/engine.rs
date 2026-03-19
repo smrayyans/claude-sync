@@ -11,7 +11,7 @@ use crate::sync::{
         detect_conflict, load_hashes, save_hashes, update_hash, hash_file,
         apply_resolution, ConflictStatus, Resolution,
     },
-    machine::{read_machine_config, write_machine_config},
+    machine::{read_machine_config, write_machine_config, append_pull_log, read_pull_log, PullLogEntry},
     watcher::wait_for_stable,
     ChangeType, FileChange, SyncResult, SyncStatus,
 };
@@ -110,6 +110,16 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
     };
 
     let token = auth::get_token(&remote_url).unwrap_or_default();
+    if token.is_empty() {
+        return Ok(SyncResult {
+            success: false,
+            files_pushed: vec![],
+            files_pulled: vec![],
+            conflicts: vec![],
+            message: "No token found. Re-enter your PAT in Settings → Remote.".to_string(),
+        });
+    }
+
     let sync_repo = sync_repo_path();
 
     // Clone or open sync repo
@@ -119,8 +129,8 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
         repo::clone_repo(&remote_url, &sync_repo, &token)?
     };
 
-    // Fetch remote
-    repo::fetch(&repository, &token)?;
+    // Fetch remote — returns false (non-fatal) when remote is empty on first push
+    let remote_has_data = repo::fetch(&repository, &token)?;
 
     // Collect local files to sync
     let claude_dir = claude_dir();
@@ -138,19 +148,20 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
             wait_for_stable(local_path).await;
         }
 
-        // Get remote content from sync repo
+        // Get remote content from sync repo (only if remote had data)
         let remote_path = sync_repo.join(file_key);
-        let remote_content = if remote_path.exists() {
+        let remote_content = if remote_has_data && remote_path.exists() {
             std::fs::read(&remote_path).ok()
         } else {
             None
         };
 
-        let status = detect_conflict(
-            local_path,
-            remote_content.as_deref(),
-            file_key,
-        );
+        // On first push (empty remote), force everything local → remote
+        let status = if !remote_has_data && local_path.exists() {
+            ConflictStatus::LocalOnly
+        } else {
+            detect_conflict(local_path, remote_content.as_deref(), file_key)
+        };
 
         match status {
             ConflictStatus::Unchanged => {}
@@ -335,6 +346,206 @@ pub fn collect_tracked_files(claude_dir: &Path) -> Vec<(String, PathBuf)> {
     }
 
     files
+}
+
+pub fn get_sync_pull_log() -> Vec<PullLogEntry> {
+    read_pull_log()
+}
+
+/// Pull-only: fetch remote and apply all remote files to local.
+pub async fn perform_pull(_app: &AppHandle) -> Result<SyncResult> {
+    let config = read_machine_config().await?;
+
+    let remote_url = match &config.remote_url {
+        Some(url) => url.clone(),
+        None => {
+            return Ok(SyncResult {
+                success: false,
+                files_pushed: vec![],
+                files_pulled: vec![],
+                conflicts: vec![],
+                message: "No remote configured. Please set up a remote in Settings.".to_string(),
+            });
+        }
+    };
+
+    let token = auth::get_token(&remote_url).unwrap_or_default();
+    if token.is_empty() {
+        return Ok(SyncResult {
+            success: false,
+            files_pushed: vec![],
+            files_pulled: vec![],
+            conflicts: vec![],
+            message: "No token found. Re-enter your PAT in Settings → Remote.".to_string(),
+        });
+    }
+
+    let sync_repo = sync_repo_path();
+    let repository = if sync_repo.exists() {
+        repo::open_repo(&sync_repo)?
+    } else {
+        repo::clone_repo(&remote_url, &sync_repo, &token)?
+    };
+
+    let remote_has_data = repo::fetch(&repository, &token)?;
+    if !remote_has_data {
+        return Ok(SyncResult {
+            success: true,
+            files_pushed: vec![],
+            files_pulled: vec![],
+            conflicts: vec![],
+            message: "Remote is empty — nothing to pull.".to_string(),
+        });
+    }
+
+    repo::pull_fast_forward(&repository)?;
+
+    let claude_dir = claude_dir();
+    let tracked_files = collect_tracked_files(&claude_dir);
+    let mut files_pulled = vec![];
+    let mut hashes = load_hashes();
+
+    for (file_key, local_path) in &tracked_files {
+        let remote_path = sync_repo.join(file_key);
+        if remote_path.exists() {
+            let content = std::fs::read(&remote_path)?;
+            if let Some(parent) = local_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(local_path, &content)?;
+            let hash = crate::sync::conflict::hash_content(&content);
+            update_hash(&mut hashes, file_key, &hash);
+            files_pulled.push(file_key.clone());
+        }
+    }
+
+    save_hashes(&hashes)?;
+
+    // Record pull log entry for this machine
+    append_pull_log(PullLogEntry {
+        machine_name: config.machine_name.clone(),
+        machine_id: config.machine_id.clone(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    });
+
+    let mut config = config;
+    config.last_synced = Some(chrono::Utc::now().to_rfc3339());
+    write_machine_config(&config).await?;
+
+    let n_pulled = files_pulled.len();
+    Ok(SyncResult {
+        success: true,
+        files_pushed: vec![],
+        files_pulled,
+        conflicts: vec![],
+        message: format!("Pulled {} files from remote", n_pulled),
+    })
+}
+
+/// Push-only: commit locally changed files and push to remote.
+pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
+    let config = read_machine_config().await?;
+
+    let remote_url = match &config.remote_url {
+        Some(url) => url.clone(),
+        None => {
+            return Ok(SyncResult {
+                success: false,
+                files_pushed: vec![],
+                files_pulled: vec![],
+                conflicts: vec![],
+                message: "No remote configured. Please set up a remote in Settings.".to_string(),
+            });
+        }
+    };
+
+    let token = auth::get_token(&remote_url).unwrap_or_default();
+    if token.is_empty() {
+        return Ok(SyncResult {
+            success: false,
+            files_pushed: vec![],
+            files_pulled: vec![],
+            conflicts: vec![],
+            message: "No token found. Re-enter your PAT in Settings → Remote.".to_string(),
+        });
+    }
+
+    let sync_repo = sync_repo_path();
+    let repository = if sync_repo.exists() {
+        repo::open_repo(&sync_repo)?
+    } else {
+        repo::clone_repo(&remote_url, &sync_repo, &token)?
+    };
+
+    // Non-fatal fetch (empty remote ok) — capture whether remote has data
+    let remote_has_data = repo::fetch(&repository, &token).unwrap_or(false);
+
+    let claude_dir = claude_dir();
+    let tracked_files = collect_tracked_files(&claude_dir);
+    let mut files_pushed = vec![];
+    let mut hashes = load_hashes();
+
+    for (file_key, local_path) in &tracked_files {
+        if !local_path.exists() {
+            continue;
+        }
+
+        // If remote is empty, force-push everything; otherwise only changed files
+        let stored_hash = hashes.hashes.get(file_key).cloned();
+        let current_hash = hash_file(local_path).ok();
+        let changed = !remote_has_data || match (&stored_hash, &current_hash) {
+            (None, Some(_)) => true,
+            (Some(s), Some(c)) if s != c => true,
+            _ => false,
+        };
+
+        if changed {
+            let remote_path = sync_repo.join(file_key);
+            if let Some(parent) = remote_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(local_path, &remote_path)?;
+            if let Some(hash) = current_hash {
+                update_hash(&mut hashes, file_key, &hash);
+            }
+            files_pushed.push(file_key.clone());
+        }
+    }
+
+    save_hashes(&hashes)?;
+
+    if !files_pushed.is_empty() {
+        let changed_list = files_pushed
+            .iter()
+            .map(|f| format!("  - {f}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let message = format!(
+            "[{}] push: {} files\n\nChanged:\n{}",
+            config.machine_name,
+            files_pushed.len(),
+            changed_list
+        );
+        repo::stage_and_commit(&repository, &files_pushed, &message)?;
+        repo::push(&repository, &token)?;
+
+        let mut config = config;
+        config.last_synced = Some(chrono::Utc::now().to_rfc3339());
+        write_machine_config(&config).await?;
+    }
+
+    let n_pushed = files_pushed.len();
+    Ok(SyncResult {
+        success: true,
+        files_pushed,
+        files_pulled: vec![],
+        conflicts: vec![],
+        message: if n_pushed == 0 {
+            "Nothing to push — already up to date.".to_string()
+        } else {
+            format!("Pushed {} files to remote", n_pushed)
+        },
+    })
 }
 
 pub fn get_pending_changes() -> Vec<FileChange> {
