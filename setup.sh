@@ -5,7 +5,7 @@
 set -e
 
 REPO="smrayyans/claude-sync"
-TMP="/tmp/claude-sync-install"
+DEB_FILE="/tmp/claude-sync.deb"
 
 echo "==> Fetching latest release..."
 DEB_URL=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
@@ -19,14 +19,21 @@ if [ -z "$DEB_URL" ]; then
     exit 1
 fi
 
-mkdir -p "$TMP"
 echo "==> Downloading $(basename "$DEB_URL")..."
-curl -fsSL "$DEB_URL" -o "$TMP/claude-sync.deb"
+curl -L -o "$DEB_FILE" "$DEB_URL"
+
+# Verify it's actually a .deb
+if ! file "$DEB_FILE" | grep -qi "debian"; then
+    echo "Error: Downloaded file is not a valid .deb package."
+    echo "URL was: $DEB_URL"
+    echo "File type: $(file "$DEB_FILE")"
+    rm -f "$DEB_FILE"
+    exit 1
+fi
 
 echo "==> Installing (may ask for password)..."
-sudo dpkg -i "$TMP/claude-sync.deb" || sudo apt-get install -f -y
-
-rm -rf "$TMP"
+sudo dpkg -i "$DEB_FILE" || sudo apt-get install -f -y
+rm -f "$DEB_FILE"
 
 echo ""
 echo "  claude-sync installed!"
