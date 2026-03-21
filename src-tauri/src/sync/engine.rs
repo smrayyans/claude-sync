@@ -4,7 +4,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use walkdir::WalkDir;
 
-use crate::claude::{agents_dir, claude_dir, projects_dir, skills_dir};
+use crate::claude::{agents_dir, canonicalize_file_key, claude_dir, localize_file_key, projects_dir, skills_dir};
 use crate::git::{auth, repo};
 use crate::sync::{
     conflict::{
@@ -47,6 +47,58 @@ pub fn sync_repo_path() -> PathBuf {
         .expect("home dir")
         .join(".claude-sync")
         .join("sync-repo")
+}
+
+/// Migrate old-style project directory names in the sync repo to canonical form.
+/// e.g. "projects/-home-rayyan-pc-Downloads-Github/" -> "projects/_HOME_-Downloads-Github/"
+/// This runs once on push/sync and is idempotent.
+fn migrate_project_dirs(sync_repo: &Path) {
+    let projects = sync_repo.join("projects");
+    if !projects.exists() {
+        return;
+    }
+    let entries: Vec<_> = std::fs::read_dir(&projects)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map_or(false, |t| t.is_dir()))
+        .collect();
+
+    for entry in entries {
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        // Skip already-canonical dirs
+        if dir_name.starts_with("_HOME_") {
+            continue;
+        }
+        let canonical = crate::claude::canonicalize_project_dir(&dir_name);
+        if canonical != dir_name {
+            let old_path = entry.path();
+            let new_path = projects.join(&canonical);
+            // If canonical target already exists, merge into it
+            if new_path.exists() {
+                // Copy files from old to new (new wins on conflict)
+                for file_entry in WalkDir::new(&old_path)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                {
+                    if let Ok(rel) = file_entry.path().strip_prefix(&old_path) {
+                        let dest = new_path.join(rel);
+                        if !dest.exists() {
+                            if let Some(parent) = dest.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let _ = std::fs::copy(file_entry.path(), &dest);
+                        }
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&old_path);
+            } else {
+                let _ = std::fs::rename(&old_path, &new_path);
+            }
+            log::info!("Migrated project dir: {} -> {}", dir_name, canonical);
+        }
+    }
 }
 
 pub async fn start_auto_sync(app: AppHandle) {
@@ -138,6 +190,9 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
     if remote_has_data {
         repo::pull_fast_forward(&repository)?;
     }
+
+    // Migrate old project dir names to canonical form
+    migrate_project_dirs(&sync_repo);
 
     // Collect local AND remote files (remote may have new files from other machines)
     let claude_dir = claude_dir();
@@ -362,6 +417,13 @@ pub fn collect_tracked_files(claude_dir: &Path) -> Vec<(String, PathBuf)> {
         }
     }
 
+    // Canonicalize project directory names so they're machine-agnostic in the sync repo.
+    // e.g. "projects/-home-rayyan-pc-Downloads-Github/memory/MEMORY.md"
+    //   -> "projects/_HOME_-Downloads-Github/memory/MEMORY.md"
+    for (key, _) in files.iter_mut() {
+        *key = canonicalize_file_key(key);
+    }
+
     files
 }
 
@@ -385,15 +447,17 @@ pub fn collect_remote_files(sync_repo: &Path, claude_dir: &Path) -> Vec<(String,
         }
 
         if let Ok(rel) = entry.path().strip_prefix(sync_repo) {
-            let key = crate::claude::normalize_path(&rel.to_string_lossy());
+            let canonical_key = crate::claude::normalize_path(&rel.to_string_lossy());
+            // Remap canonical project dirs to local machine's paths
+            let local_key = localize_file_key(&canonical_key);
 
-            // Skip excluded paths
-            let local_path = claude_dir.join(&key);
+            let local_path = claude_dir.join(&local_key);
             if is_excluded(&local_path, claude_dir) {
                 continue;
             }
 
-            files.push((key, local_path));
+            // Use the canonical key (matches sync repo path), but point to local path
+            files.push((canonical_key, local_path));
         }
     }
 
@@ -451,6 +515,9 @@ pub async fn perform_pull(_app: &AppHandle) -> Result<SyncResult> {
     }
 
     repo::pull_fast_forward(&repository)?;
+
+    // Migrate old project dir names to canonical form
+    migrate_project_dirs(&sync_repo);
 
     let claude_dir = claude_dir();
 
@@ -550,6 +617,9 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
     if remote_has_data {
         repo::pull_fast_forward(&repository)?;
     }
+
+    // Migrate old project dir names to canonical form
+    migrate_project_dirs(&sync_repo);
 
     let claude_dir = claude_dir();
     let tracked_files = collect_tracked_files(&claude_dir);
