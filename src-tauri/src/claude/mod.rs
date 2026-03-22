@@ -72,6 +72,120 @@ pub fn canonicalize_project_dir(dir_name: &str) -> String {
     }
 }
 
+/// Convert ANY machine's project dir name to canonical form.
+/// Detects patterns like "-home-<user>-..." or "-Users-<user>-..." from any machine.
+/// e.g. "-home-rayyan-laptop-Downloads-Github" -> "_HOME_-Downloads-Github"
+pub fn canonicalize_project_dir_universal(dir_name: &str) -> String {
+    let stripped = dir_name.trim_start_matches('-');
+
+    // Linux/Mac: "home-<username>-..."
+    if stripped.starts_with("home-") {
+        let after_home = &stripped["home-".len()..]; // "rayyan-pc-Downloads-Github"
+        // The username is everything up to the next path segment.
+        // Claude Code encodes paths as: /home/user/foo/bar -> -home-user-foo-bar
+        // The username could contain hyphens, but home dirs are typically one segment.
+        // We use a heuristic: match known patterns like "home-<word>-" or "home-<word>-<word>-"
+        // Actually, the simplest approach: find where a known directory name starts
+        // (Downloads, Documents, Desktop, Projects, dev, src, opt, var, etc.)
+        // OR just find the first component after "home-" by checking if removing it
+        // produces a valid canonical result matching our own machine's pattern.
+        //
+        // Safest approach: the username is everything up to where the path diverges
+        // from the home directory. Since Claude Code uses the FULL path, the structure
+        // after the username matches the actual directory structure.
+        // We'll match "home-<anything that's not a common dir>-" greedily.
+
+        // Strategy: try to find the username by matching against common path starts
+        // that come AFTER the home dir. If none found, fall back to first hyphen-word.
+        if let Some(idx) = find_path_after_username(after_home) {
+            let rest = &after_home[idx..];
+            return format!("{HOME_PLACEHOLDER}-{rest}");
+        }
+    }
+
+    // Windows: "Users-<username>-..." or "C-Users-<username>-..."
+    let win_start = if stripped.starts_with("Users-") {
+        Some("Users-".len())
+    } else if stripped.len() > 2 && stripped.as_bytes()[1] == b'-' && stripped[2..].starts_with("Users-") {
+        Some(2 + "Users-".len())
+    } else {
+        None
+    };
+    if let Some(start) = win_start {
+        let after_users = &stripped[start..];
+        if let Some(idx) = find_path_after_username(after_users) {
+            let rest = &after_users[idx..];
+            return format!("{HOME_PLACEHOLDER}-{rest}");
+        }
+    }
+
+    // Already canonical or unrecognized
+    dir_name.to_string()
+}
+
+/// Find where the actual path starts after the username in a hyphen-encoded path.
+/// Given "rayyan-pc-Downloads-Github", returns the index of "Downloads-Github".
+/// Given "rayyan-laptop-minecraft", returns the index of "minecraft".
+/// Given "rayyan-laptop", returns None (no path after username = home dir itself).
+fn find_path_after_username(s: &str) -> Option<usize> {
+    // Common top-level directory names that appear right after the home dir
+    let markers = [
+        "Downloads", "Documents", "Desktop", "Projects", "projects",
+        "dev", "src", "opt", "code", "Code", "workspace", "Workspace",
+        "repos", "github", "Github", "GitHub", ".config", ".local",
+        "go", "rust", "node", "minecraft", "snap", "Music", "Videos",
+        "Pictures", "Templates", "Public",
+    ];
+
+    // Walk through possible positions where a marker could start
+    let mut pos = 0;
+    for (i, ch) in s.char_indices() {
+        if ch == '-' && i > 0 {
+            let after = &s[i + 1..];
+            for marker in &markers {
+                if after.starts_with(marker) {
+                    let after_marker = &after[marker.len()..];
+                    // Marker must be followed by '-', end of string, or nothing
+                    if after_marker.is_empty() || after_marker.starts_with('-') {
+                        return Some(i + 1);
+                    }
+                }
+            }
+            pos = i + 1;
+        }
+    }
+
+    // If no marker found but there's content, check if the whole thing after
+    // first hyphen-segment could be a path (for single-segment usernames)
+    // e.g., "rayyan-Downloads" -- "rayyan" is username, "Downloads" is path
+    // But we already checked markers above, so if nothing matched, the whole
+    // string might just be a username with no subdirectory.
+
+    // Fallback: if the string is just a username (no path after home dir),
+    // return Some(len) so canonical becomes "_HOME_-" (matching "_HOME_" dir)
+    // Actually no -- if there's genuinely no path after username, return None
+    // to signal this is just the home dir project (e.g. "projects/-home-user/")
+    if pos == 0 {
+        // No hyphens at all -- entire string is the username
+        // The canonical form is just "_HOME_" with no suffix
+        return Some(s.len());
+    }
+
+    None
+}
+
+/// Check if a project dir name belongs to the current machine (not canonical, not foreign)
+pub fn is_local_project_dir(dir_name: &str) -> bool {
+    let home_prefix = encoded_home_prefix();
+    let stripped = dir_name.trim_start_matches('-');
+    stripped.starts_with(&home_prefix)
+}
+
+/// Check if a project dir name is already in canonical form
+pub fn is_canonical_project_dir(dir_name: &str) -> bool {
+    dir_name.starts_with(HOME_PLACEHOLDER)
+}
+
 /// Convert a canonical project dir name to the local machine's form.
 /// e.g. "_HOME_-Downloads-Github" -> "-home-rayyan-laptop-Downloads-Github"
 pub fn localize_project_dir(canonical_name: &str) -> String {

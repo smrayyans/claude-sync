@@ -50,10 +50,20 @@ pub fn sync_repo_path() -> PathBuf {
 }
 
 /// Migrate old-style project directory names in the sync repo to canonical form.
+/// Uses universal canonicalization to handle dirs from ANY machine.
 /// e.g. "projects/-home-rayyan-pc-Downloads-Github/" -> "projects/_HOME_-Downloads-Github/"
-/// This runs once on push/sync and is idempotent.
+/// e.g. "projects/-home-rayyan-laptop-Downloads-Github/" -> "projects/_HOME_-Downloads-Github/"
 fn migrate_project_dirs(sync_repo: &Path) {
-    let projects = sync_repo.join("projects");
+    merge_project_dirs_in(&sync_repo.join("projects"));
+}
+
+/// Migrate old-style project directory names in the LOCAL ~/.claude/projects to
+/// merge foreign machine dirs and canonical dirs into the local machine's paths.
+/// e.g. on rayyan-pc:
+///   "_HOME_-Downloads-Github/" -> "-home-rayyan-pc-Downloads-Github/"
+///   "-home-rayyan-laptop-Downloads-Github/" -> "-home-rayyan-pc-Downloads-Github/"
+fn migrate_local_project_dirs(claude_dir: &Path) {
+    let projects = claude_dir.join("projects");
     if !projects.exists() {
         return;
     }
@@ -66,38 +76,89 @@ fn migrate_project_dirs(sync_repo: &Path) {
 
     for entry in entries {
         let dir_name = entry.file_name().to_string_lossy().to_string();
-        // Skip already-canonical dirs
+
+        // Skip dirs that already belong to this machine
+        if crate::claude::is_local_project_dir(&dir_name) {
+            continue;
+        }
+
+        // For canonical (_HOME_-*) or foreign machine dirs, localize them
+        let target_name = if crate::claude::is_canonical_project_dir(&dir_name) {
+            crate::claude::localize_project_dir(&dir_name)
+        } else {
+            // Foreign machine dir: canonicalize universally, then localize
+            let canonical = crate::claude::canonicalize_project_dir_universal(&dir_name);
+            if canonical == dir_name {
+                continue; // Couldn't recognize pattern, leave it alone
+            }
+            crate::claude::localize_project_dir(&canonical)
+        };
+
+        if target_name == dir_name {
+            continue;
+        }
+
+        let old_path = entry.path();
+        let new_path = projects.join(&target_name);
+        merge_dir_into(&old_path, &new_path);
+        log::info!("Local migrate: {} -> {}", dir_name, target_name);
+    }
+}
+
+/// Canonicalize all project dirs in a directory (for the sync repo).
+fn merge_project_dirs_in(projects: &Path) {
+    if !projects.exists() {
+        return;
+    }
+    let entries: Vec<_> = std::fs::read_dir(projects)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map_or(false, |t| t.is_dir()))
+        .collect();
+
+    for entry in entries {
+        let dir_name = entry.file_name().to_string_lossy().to_string();
         if dir_name.starts_with("_HOME_") {
             continue;
         }
-        let canonical = crate::claude::canonicalize_project_dir(&dir_name);
-        if canonical != dir_name {
-            let old_path = entry.path();
-            let new_path = projects.join(&canonical);
-            // If canonical target already exists, merge into it
-            if new_path.exists() {
-                // Copy files from old to new (new wins on conflict)
-                for file_entry in WalkDir::new(&old_path)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().is_file())
-                {
-                    if let Ok(rel) = file_entry.path().strip_prefix(&old_path) {
-                        let dest = new_path.join(rel);
-                        if !dest.exists() {
-                            if let Some(parent) = dest.parent() {
-                                let _ = std::fs::create_dir_all(parent);
-                            }
-                            let _ = std::fs::copy(file_entry.path(), &dest);
-                        }
-                    }
-                }
-                let _ = std::fs::remove_dir_all(&old_path);
-            } else {
-                let _ = std::fs::rename(&old_path, &new_path);
-            }
-            log::info!("Migrated project dir: {} -> {}", dir_name, canonical);
+        // Use universal canonicalization to handle ANY machine's paths
+        let canonical = crate::claude::canonicalize_project_dir_universal(&dir_name);
+        if canonical == dir_name {
+            continue;
         }
+        let old_path = entry.path();
+        let new_path = projects.join(&canonical);
+        merge_dir_into(&old_path, &new_path);
+        log::info!("Migrated project dir: {} -> {}", dir_name, canonical);
+    }
+}
+
+/// Merge contents of src_dir into dst_dir, then remove src_dir.
+/// Existing files in dst_dir are NOT overwritten.
+fn merge_dir_into(src_dir: &Path, dst_dir: &Path) {
+    if dst_dir.exists() {
+        for file_entry in WalkDir::new(src_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            if let Ok(rel) = file_entry.path().strip_prefix(src_dir) {
+                let dest = dst_dir.join(rel);
+                if !dest.exists() {
+                    if let Some(parent) = dest.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::copy(file_entry.path(), &dest);
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(src_dir);
+    } else {
+        if let Some(parent) = dst_dir.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::rename(src_dir, dst_dir);
     }
 }
 
@@ -193,6 +254,7 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
 
     // Migrate old project dir names to canonical form
     migrate_project_dirs(&sync_repo);
+    migrate_local_project_dirs(&claude_dir());
 
     // Collect local AND remote files (remote may have new files from other machines)
     let claude_dir = claude_dir();
@@ -317,6 +379,18 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
     })
 }
 
+/// Check if a file path is inside a LOCAL project dir (not canonical or foreign).
+/// This ensures we only collect files from the current machine's project folders.
+fn is_local_project_path(path: &Path, projects_dir: &Path) -> bool {
+    if let Ok(rel) = path.strip_prefix(projects_dir) {
+        if let Some(first_component) = rel.components().next() {
+            let dir_name = first_component.as_os_str().to_string_lossy();
+            return crate::claude::is_local_project_dir(&dir_name);
+        }
+    }
+    true // Non-project files are always local
+}
+
 pub fn collect_tracked_files(claude_dir: &Path) -> Vec<(String, PathBuf)> {
     let mut files = vec![];
 
@@ -365,6 +439,7 @@ pub fn collect_tracked_files(claude_dir: &Path) -> Vec<(String, PathBuf)> {
     }
 
     // projects/*/*.jsonl  (chat sessions — sync the JSONL files)
+    // Only collect from LOCAL project dirs (skip _HOME_-* and foreign machine dirs)
     let projects_dir_for_history = projects_dir();
     if projects_dir_for_history.exists() {
         for entry in WalkDir::new(&projects_dir_for_history)
@@ -381,6 +456,9 @@ pub fn collect_tracked_files(claude_dir: &Path) -> Vec<(String, PathBuf)> {
             if is_excluded(entry.path(), claude_dir) {
                 continue;
             }
+            if !is_local_project_path(entry.path(), &projects_dir_for_history) {
+                continue;
+            }
             if let Ok(rel) = entry.path().strip_prefix(claude_dir) {
                 let key = crate::claude::normalize_path(&rel.to_string_lossy());
                 files.push((key, entry.path().to_path_buf()));
@@ -389,6 +467,7 @@ pub fn collect_tracked_files(claude_dir: &Path) -> Vec<(String, PathBuf)> {
     }
 
     // projects/*/memory/
+    // Only collect from LOCAL project dirs
     let projects_dir = projects_dir();
     if projects_dir.exists() {
         for entry in WalkDir::new(&projects_dir)
@@ -398,6 +477,9 @@ pub fn collect_tracked_files(claude_dir: &Path) -> Vec<(String, PathBuf)> {
             .filter(|e| e.file_type().is_file())
         {
             if is_excluded(entry.path(), claude_dir) {
+                continue;
+            }
+            if !is_local_project_path(entry.path(), &projects_dir) {
                 continue;
             }
 
@@ -518,6 +600,7 @@ pub async fn perform_pull(_app: &AppHandle) -> Result<SyncResult> {
 
     // Migrate old project dir names to canonical form
     migrate_project_dirs(&sync_repo);
+    migrate_local_project_dirs(&claude_dir());
 
     let claude_dir = claude_dir();
 
@@ -620,6 +703,7 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
 
     // Migrate old project dir names to canonical form
     migrate_project_dirs(&sync_repo);
+    migrate_local_project_dirs(&claude_dir());
 
     let claude_dir = claude_dir();
     let tracked_files = collect_tracked_files(&claude_dir);
@@ -867,7 +951,8 @@ pub async fn resolve_file_conflict(
     resolution: Resolution,
 ) -> Result<()> {
     let claude_dir = claude_dir();
-    let local_path = crate::claude::native_path(file_key);
+    let local_key = crate::claude::localize_file_key(file_key);
+    let local_path = crate::claude::native_path(&local_key);
     let local_full = claude_dir.join(local_path);
 
     let sync_repo = sync_repo_path();
