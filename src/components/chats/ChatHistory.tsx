@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { MessageSquare, FolderOpen, ChevronRight, ArrowLeft, Bot, User, Wrench } from "lucide-react";
+import { MessageSquare, FolderOpen, ChevronRight, ArrowLeft, Bot, User, Wrench, Trash2, CheckSquare, Square, Calendar, Cloud, HardDrive, X } from "lucide-react";
 import { formatRelativeTime, cn } from "../../lib/utils";
 
 interface ChatSession {
@@ -11,6 +11,9 @@ interface ChatSession {
   message_count: number;
   first_user_message: string;
   path: string;
+  file_size_bytes: number;
+  line_count: number;
+  is_synced: boolean;
 }
 
 interface ChatMessage {
@@ -20,6 +23,26 @@ interface ChatMessage {
   is_tool_use: boolean;
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function getDateGroup(timestamp: string): string {
+  if (!timestamp) return "Unknown";
+  const date = new Date(timestamp);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
+  if (diffDays < 7) return "This week";
+  if (diffDays < 30) return "This month";
+  return "Older";
+}
+
 export default function ChatHistory() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -27,6 +50,11 @@ export default function ChatHistory() {
   const [loading, setLoading] = useState(true);
   const [loadingMsgs, setLoadingMsgs] = useState(false);
   const [search, setSearch] = useState("");
+  const [groupBy, setGroupBy] = useState<"project" | "date">("project");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [isSelecting, setIsSelecting] = useState(false);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [deleteFromSync, setDeleteFromSync] = useState(false);
 
   useEffect(() => {
     loadSessions();
@@ -45,6 +73,10 @@ export default function ChatHistory() {
   };
 
   const openSession = async (session: ChatSession) => {
+    if (isSelecting) {
+      toggleSelect(session.path);
+      return;
+    }
     setSelected(session);
     setLoadingMsgs(true);
     try {
@@ -59,6 +91,36 @@ export default function ChatHistory() {
     }
   };
 
+  const toggleSelect = (path: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const handleDelete = async () => {
+    const paths = Array.from(selectedIds);
+    if (paths.length === 0) return;
+
+    try {
+      await invoke("delete_chat_sessions", { paths, deleteFromSync: deleteFromSync });
+      setSessions((prev) => prev.filter((s) => !selectedIds.has(s.path)));
+      setSelectedIds(new Set());
+      setIsSelecting(false);
+    } catch (e) {
+      console.error("Delete failed:", e);
+    }
+    setShowDeleteDialog(false);
+    setDeleteFromSync(false);
+  };
+
+  const handleDeleteSingle = async (session: ChatSession) => {
+    setSelectedIds(new Set([session.path]));
+    setShowDeleteDialog(true);
+  };
+
   const filtered = sessions.filter(
     (s) =>
       search === "" ||
@@ -66,17 +128,64 @@ export default function ChatHistory() {
       s.project_display.toLowerCase().includes(search.toLowerCase())
   );
 
-  // Group by project
+  // Group sessions
   const groups: Record<string, ChatSession[]> = {};
   for (const s of filtered) {
-    if (!groups[s.project_display]) groups[s.project_display] = [];
-    groups[s.project_display].push(s);
+    const key = groupBy === "project" ? s.project_display : getDateGroup(s.timestamp);
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(s);
   }
 
+  // Sort date groups in order
+  const groupOrder = groupBy === "date"
+    ? ["Today", "Yesterday", "This week", "This month", "Older"]
+    : Object.keys(groups).sort();
+
+  const sortedGroups = groupOrder.filter((k) => groups[k]?.length > 0);
+
+  // Delete confirmation dialog
+  if (showDeleteDialog) {
+    return (
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="bg-surface rounded-xl border border-border p-6 max-w-sm w-full shadow-xl">
+          <h3 className="text-base font-semibold text-text mb-2">
+            Delete {selectedIds.size} session{selectedIds.size > 1 ? "s" : ""}?
+          </h3>
+          <p className="text-sm text-text-muted mb-4">
+            This cannot be undone.
+          </p>
+          <label className="flex items-center gap-2 text-sm text-text-muted mb-5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={deleteFromSync}
+              onChange={(e) => setDeleteFromSync(e.target.checked)}
+              className="rounded"
+            />
+            Also remove from sync repository
+          </label>
+          <div className="flex gap-2 justify-end">
+            <button
+              onClick={() => { setShowDeleteDialog(false); setDeleteFromSync(false); }}
+              className="btn-ghost px-4 py-2 text-sm"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleDelete}
+              className="px-4 py-2 text-sm rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+            >
+              Delete
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Session detail view
   if (selected) {
     return (
       <div className="flex flex-col h-full">
-        {/* Header */}
         <div className="flex items-center gap-3 p-4 border-b border-border bg-surface flex-shrink-0">
           <button onClick={() => { setSelected(null); setMessages([]); }} className="btn-ghost p-1.5">
             <ArrowLeft size={16} />
@@ -88,15 +197,28 @@ export default function ChatHistory() {
             <div className="text-xs text-text-muted mt-0.5 flex items-center gap-2">
               <FolderOpen size={10} />
               {selected.project_display}
-              <span>·</span>
+              <span>-</span>
               {formatRelativeTime(selected.timestamp)}
-              <span>·</span>
+              <span>-</span>
               {selected.message_count} messages
+              <span>-</span>
+              {formatBytes(selected.file_size_bytes)}
+              {selected.is_synced ? (
+                <Cloud size={10} className="text-green-400" />
+              ) : (
+                <HardDrive size={10} className="text-text-dim" />
+              )}
             </div>
           </div>
+          <button
+            onClick={() => handleDeleteSingle(selected)}
+            className="btn-ghost p-1.5 text-text-dim hover:text-red-400"
+            title="Delete session"
+          >
+            <Trash2 size={14} />
+          </button>
         </div>
 
-        {/* Messages */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {loadingMsgs ? (
             <div className="text-sm text-text-muted">Loading messages...</div>
@@ -112,6 +234,7 @@ export default function ChatHistory() {
     );
   }
 
+  // List view
   return (
     <div className="p-6">
       <div className="mb-5">
@@ -121,13 +244,80 @@ export default function ChatHistory() {
         </p>
       </div>
 
-      <input
-        type="text"
-        className="input mb-5 text-sm"
-        placeholder="Search chats..."
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-      />
+      {/* Toolbar */}
+      <div className="flex items-center gap-3 mb-4">
+        <input
+          type="text"
+          className="input flex-1 text-sm"
+          placeholder="Search chats..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+
+        {/* Group by toggle */}
+        <div className="flex rounded-lg border border-border overflow-hidden text-xs">
+          <button
+            onClick={() => setGroupBy("project")}
+            className={cn(
+              "px-3 py-1.5 transition-colors",
+              groupBy === "project" ? "bg-accent/20 text-accent" : "text-text-muted hover:bg-surface-2"
+            )}
+          >
+            <FolderOpen size={12} className="inline mr-1" />
+            Project
+          </button>
+          <button
+            onClick={() => setGroupBy("date")}
+            className={cn(
+              "px-3 py-1.5 transition-colors",
+              groupBy === "date" ? "bg-accent/20 text-accent" : "text-text-muted hover:bg-surface-2"
+            )}
+          >
+            <Calendar size={12} className="inline mr-1" />
+            Date
+          </button>
+        </div>
+
+        {/* Select mode toggle */}
+        <button
+          onClick={() => {
+            setIsSelecting(!isSelecting);
+            if (isSelecting) setSelectedIds(new Set());
+          }}
+          className={cn(
+            "btn-ghost p-2 text-xs",
+            isSelecting && "text-accent"
+          )}
+          title={isSelecting ? "Cancel selection" : "Select sessions"}
+        >
+          {isSelecting ? <X size={14} /> : <CheckSquare size={14} />}
+        </button>
+      </div>
+
+      {/* Selection toolbar */}
+      {isSelecting && selectedIds.size > 0 && (
+        <div className="flex items-center gap-3 mb-4 p-3 rounded-lg bg-surface-2 border border-border">
+          <span className="text-xs text-text-muted flex-1">
+            {selectedIds.size} selected
+          </span>
+          <button
+            onClick={() => {
+              const allPaths = filtered.map((s) => s.path);
+              setSelectedIds(new Set(allPaths));
+            }}
+            className="text-xs text-accent hover:underline"
+          >
+            Select all
+          </button>
+          <button
+            onClick={() => setShowDeleteDialog(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+          >
+            <Trash2 size={12} />
+            Delete {selectedIds.size}
+          </button>
+        </div>
+      )}
 
       {loading ? (
         <div className="text-sm text-text-muted">Loading chat history...</div>
@@ -141,21 +331,37 @@ export default function ChatHistory() {
         </div>
       ) : (
         <div className="space-y-4">
-          {Object.entries(groups).map(([project, projectSessions]) => (
-            <div key={project}>
+          {sortedGroups.map((groupKey) => (
+            <div key={groupKey}>
               <div className="flex items-center gap-1.5 mb-2">
-                <FolderOpen size={12} className="text-accent" />
-                <span className="text-xs font-medium text-text-muted">{project}</span>
-                <span className="text-xs text-text-dim">({projectSessions.length})</span>
+                {groupBy === "project" ? (
+                  <FolderOpen size={12} className="text-accent" />
+                ) : (
+                  <Calendar size={12} className="text-accent" />
+                )}
+                <span className="text-xs font-medium text-text-muted">{groupKey}</span>
+                <span className="text-xs text-text-dim">({groups[groupKey].length})</span>
               </div>
               <div className="space-y-1.5">
-                {projectSessions.map((session) => (
+                {groups[groupKey].map((session) => (
                   <div
                     key={session.id}
-                    className="card cursor-pointer hover:border-accent/40 transition-colors group"
+                    className={cn(
+                      "card cursor-pointer hover:border-accent/40 transition-colors group",
+                      selectedIds.has(session.path) && "border-accent/60 bg-accent/5"
+                    )}
                     onClick={() => openSession(session)}
                   >
                     <div className="flex items-start gap-3">
+                      {isSelecting && (
+                        <div className="mt-0.5 flex-shrink-0">
+                          {selectedIds.has(session.path) ? (
+                            <CheckSquare size={14} className="text-accent" />
+                          ) : (
+                            <Square size={14} className="text-text-dim" />
+                          )}
+                        </div>
+                      )}
                       <MessageSquare size={14} className="text-accent mt-0.5 flex-shrink-0" />
                       <div className="flex-1 min-w-0">
                         <p className="text-sm text-text line-clamp-2 leading-snug">
@@ -163,10 +369,31 @@ export default function ChatHistory() {
                         </p>
                         <div className="flex items-center gap-3 mt-1.5 text-xs text-text-dim">
                           <span>{formatRelativeTime(session.timestamp)}</span>
-                          <span>{session.message_count} messages</span>
+                          <span>{session.message_count} msgs</span>
+                          <span>{formatBytes(session.file_size_bytes)}</span>
+                          {session.is_synced ? (
+                            <span className="flex items-center gap-1 text-green-400">
+                              <Cloud size={10} /> synced
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1">
+                              <HardDrive size={10} /> local
+                            </span>
+                          )}
                         </div>
                       </div>
-                      <ChevronRight size={14} className="text-text-dim opacity-0 group-hover:opacity-100 mt-0.5 flex-shrink-0" />
+                      {!isSelecting && (
+                        <div className="flex items-center gap-1 flex-shrink-0">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleDeleteSingle(session); }}
+                            className="p-1 opacity-0 group-hover:opacity-100 text-text-dim hover:text-red-400 transition-all"
+                            title="Delete"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                          <ChevronRight size={14} className="text-text-dim opacity-0 group-hover:opacity-100 mt-0.5" />
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -224,7 +451,6 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
 }
 
 function MessageContent({ content }: { content: string }) {
-  // Simple markdown-ish rendering
   const lines = content.split("\n");
 
   return (
@@ -237,7 +463,7 @@ function MessageContent({ content }: { content: string }) {
           return <div key={i} className="font-bold text-text mt-2">{line.slice(2)}</div>;
         }
         if (line.startsWith("- ") || line.startsWith("* ")) {
-          return <div key={i} className="flex gap-2"><span className="text-accent mt-0.5">•</span><span>{line.slice(2)}</span></div>;
+          return <div key={i} className="flex gap-2"><span className="text-accent mt-0.5">-</span><span>{line.slice(2)}</span></div>;
         }
         if (line.startsWith("```")) {
           return <div key={i} className="font-mono text-xs bg-background rounded px-2 py-1 text-text-muted">{line}</div>;

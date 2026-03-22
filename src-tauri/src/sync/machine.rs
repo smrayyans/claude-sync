@@ -54,6 +54,12 @@ pub struct CustomPaths {
     /// Override for projects directory (default: <claudeDir>/projects)
     #[serde(rename = "projectsDir", skip_serializing_if = "Option::is_none")]
     pub projects_dir: Option<String>,
+    /// Override for plugins directory (default: <claudeDir>/plugins)
+    #[serde(rename = "pluginsDir", skip_serializing_if = "Option::is_none")]
+    pub plugins_dir: Option<String>,
+    /// Override for plans directory (default: <claudeDir>/plans)
+    #[serde(rename = "plansDir", skip_serializing_if = "Option::is_none")]
+    pub plans_dir: Option<String>,
 }
 
 impl Default for CustomPaths {
@@ -63,6 +69,8 @@ impl Default for CustomPaths {
             agents_dir: None,
             skills_dir: None,
             projects_dir: None,
+            plugins_dir: None,
+            plans_dir: None,
         }
     }
 }

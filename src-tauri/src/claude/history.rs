@@ -15,6 +15,9 @@ pub struct ChatSession {
     pub message_count: usize,
     pub first_user_message: String,
     pub path: String,
+    pub file_size_bytes: u64,
+    pub line_count: usize,
+    pub is_synced: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +86,16 @@ fn is_noise(content: &str) -> bool {
 }
 
 fn project_slug_to_display(slug: &str) -> String {
+    // Handle canonical _HOME_ prefix
+    if slug.starts_with("_HOME_") {
+        let rest = slug.strip_prefix("_HOME_").unwrap_or("");
+        let rest = rest.trim_start_matches('-');
+        if rest.is_empty() {
+            return "Home".to_string();
+        }
+        return format!("~/{}", rest.replace('-', "/"));
+    }
+
     // Convert "-home-rayyan-pc-Downloads-Github-myproject" → "~/Downloads/Github/myproject"
     let s = slug.trim_start_matches('-');
     let parts: Vec<&str> = s.split('-').collect();
@@ -112,6 +125,21 @@ fn project_slug_to_display(slug: &str) -> String {
 
 fn parse_session(path: &std::path::Path, project_slug: &str) -> Result<Option<ChatSession>> {
     let content = fs::read_to_string(path)?;
+    let file_size_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let line_count = content.lines().count();
+
+    // Check if this file exists in the sync repo
+    let is_synced = {
+        let sync_repo = crate::sync::engine::sync_repo_path();
+        if sync_repo.exists() {
+            let rel = path.strip_prefix(super::claude_dir()).unwrap_or(path);
+            let canonical = super::canonicalize_file_key(&super::normalize_path(&rel.to_string_lossy()));
+            sync_repo.join(&canonical).exists()
+        } else {
+            false
+        }
+    };
+
     let id = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -175,6 +203,9 @@ fn parse_session(path: &std::path::Path, project_slug: &str) -> Result<Option<Ch
         message_count,
         first_user_message: first_user_msg,
         path: super::normalize_path(&path.to_string_lossy()),
+        file_size_bytes,
+        line_count,
+        is_synced,
     }))
 }
 
@@ -215,6 +246,41 @@ pub fn list_sessions() -> Result<Vec<ChatSession>> {
     // Sort newest first
     sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     Ok(sessions)
+}
+
+/// Delete a single chat session locally, and optionally from the sync repo.
+pub fn delete_session(session_path: &str, delete_from_sync: bool) -> Result<()> {
+    let path = PathBuf::from(super::native_path(session_path));
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+
+    if delete_from_sync {
+        let sync_repo = crate::sync::engine::sync_repo_path();
+        if sync_repo.exists() {
+            let claude_dir = super::claude_dir();
+            if let Ok(rel) = path.strip_prefix(&claude_dir) {
+                let canonical = super::canonicalize_file_key(&super::normalize_path(&rel.to_string_lossy()));
+                let sync_path = sync_repo.join(&canonical);
+                if sync_path.exists() {
+                    fs::remove_file(&sync_path)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Delete multiple chat sessions. Returns list of successfully deleted paths.
+pub fn delete_sessions(paths: Vec<String>, delete_from_sync: bool) -> Result<Vec<String>> {
+    let mut deleted = vec![];
+    for path in &paths {
+        if delete_session(path, delete_from_sync).is_ok() {
+            deleted.push(path.clone());
+        }
+    }
+    Ok(deleted)
 }
 
 pub fn get_session_messages(session_path: &str) -> Result<Vec<ChatMessage>> {

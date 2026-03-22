@@ -61,6 +61,8 @@ pub fn run() {
             // Chat history commands
             list_chat_sessions,
             get_chat_messages,
+            delete_chat_session,
+            delete_chat_sessions,
             // Sync history & conflict commands
             get_commit_history,
             get_commit_diff,

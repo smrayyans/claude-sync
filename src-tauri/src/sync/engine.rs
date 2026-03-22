@@ -4,7 +4,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use walkdir::WalkDir;
 
-use crate::claude::{agents_dir, canonicalize_file_key, claude_dir, localize_file_key, projects_dir, skills_dir};
+use crate::claude::{agents_dir, canonicalize_file_key, claude_dir, localize_file_key, plans_dir, plugins_dir, projects_dir, skills_dir};
 use crate::git::{auth, repo};
 use crate::sync::{
     conflict::{
@@ -252,6 +252,52 @@ pub async fn check_online() -> bool {
     .unwrap_or(false)
 }
 
+/// Fetch from remote with retry (synchronous, since git2 is blocking).
+fn fetch_with_retry(repository: &git2::Repository, token: &str) -> anyhow::Result<bool> {
+    let max_retries: u32 = 3;
+    let base_delay_ms: u64 = 1000;
+    let mut last_err = None;
+
+    for attempt in 0..=max_retries {
+        match repo::fetch(repository, token) {
+            Ok(val) => return Ok(val),
+            Err(e) => {
+                if attempt == max_retries {
+                    last_err = Some(e);
+                    break;
+                }
+                let delay = std::cmp::min(base_delay_ms * 2u64.pow(attempt), 30000);
+                log::warn!("fetch failed (attempt {}/{}): {}. Retrying in {}ms...", attempt + 1, max_retries + 1, e, delay);
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("fetch failed after retries")))
+}
+
+/// Push to remote with retry (synchronous, since git2 is blocking).
+fn push_with_retry(repository: &git2::Repository, token: &str) -> anyhow::Result<()> {
+    let max_retries: u32 = 3;
+    let base_delay_ms: u64 = 1000;
+    let mut last_err = None;
+
+    for attempt in 0..=max_retries {
+        match repo::push(repository, token) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt == max_retries {
+                    last_err = Some(e);
+                    break;
+                }
+                let delay = std::cmp::min(base_delay_ms * 2u64.pow(attempt), 30000);
+                log::warn!("push failed (attempt {}/{}): {}. Retrying in {}ms...", attempt + 1, max_retries + 1, e, delay);
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("push failed after retries")))
+}
+
 pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
     let config = read_machine_config().await?;
 
@@ -289,7 +335,7 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
     };
 
     // Fetch remote — returns false (non-fatal) when remote is empty on first push
-    let remote_has_data = repo::fetch(&repository, &token)?;
+    let remote_has_data = fetch_with_retry(&repository, &token)?;
 
     // Fast-forward sync repo to latest remote so our push is always clean
     if remote_has_data {
@@ -366,8 +412,41 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
                 }
             }
             ConflictStatus::Conflict => {
-                conflicts.push(file_key.clone());
-                let _ = app.emit("sync-conflict", file_key.clone());
+                let local_content = std::fs::read(local_path).unwrap_or_default();
+                let remote_bytes = remote_content.clone().unwrap_or_default();
+
+                match crate::sync::merge::smart_merge(file_key, &local_content, &remote_bytes) {
+                    crate::sync::merge::MergeResult::AutoMerged(merged) => {
+                        // Write merged content to both local and sync repo
+                        if let Some(parent) = local_path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(local_path, &merged)?;
+                        if let Some(parent) = remote_path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&remote_path, &merged)?;
+                        let hash = crate::sync::conflict::hash_content(&merged);
+                        update_hash(&mut hashes, file_key, &hash);
+                        files_pushed.push(file_key.clone());
+                        files_pulled.push(file_key.clone());
+                    }
+                    crate::sync::merge::MergeResult::Conflict { remote, .. } => {
+                        if file_key.starts_with("plans/") && file_key.ends_with(".md") {
+                            // Keep both: save remote version with machine suffix
+                            let suffixed = file_key.replace(".md", &format!(".{}.md", config.machine_name));
+                            let suffixed_local = claude_dir.join(crate::claude::localize_file_key(&suffixed));
+                            if let Some(parent) = suffixed_local.parent() {
+                                std::fs::create_dir_all(parent)?;
+                            }
+                            std::fs::write(&suffixed_local, &remote)?;
+                            files_pulled.push(suffixed);
+                        } else {
+                            conflicts.push(file_key.clone());
+                            let _ = app.emit("sync-conflict", file_key.clone());
+                        }
+                    }
+                }
             }
         }
     }
@@ -392,7 +471,7 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
         );
 
         repo::stage_and_commit(&repository, &files_pushed, &message)?;
-        repo::push(&repository, &token)?;
+        push_with_retry(&repository, &token)?;
     }
 
     // Update last synced time
@@ -475,6 +554,31 @@ pub fn collect_tracked_files(claude_dir: &Path) -> Vec<(String, PathBuf)> {
             if is_excluded(entry.path(), claude_dir) {
                 continue;
             }
+            if let Ok(rel) = entry.path().strip_prefix(claude_dir) {
+                let key = crate::claude::normalize_path(&rel.to_string_lossy());
+                files.push((key, entry.path().to_path_buf()));
+            }
+        }
+    }
+
+    // plugins/ — only manifest files (NOT cache/ or marketplaces/)
+    let plugins_dir = plugins_dir();
+    for name in &["installed_plugins.json", "known_marketplaces.json", "blocklist.json"] {
+        let path = plugins_dir.join(name);
+        if path.exists() {
+            files.push((format!("plugins/{name}"), path));
+        }
+    }
+
+    // plans/ — all .md files
+    let plans_dir = plans_dir();
+    if plans_dir.exists() {
+        for entry in WalkDir::new(&plans_dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file() && e.path().extension().map_or(false, |ext| ext == "md"))
+        {
             if let Ok(rel) = entry.path().strip_prefix(claude_dir) {
                 let key = crate::claude::normalize_path(&rel.to_string_lossy());
                 files.push((key, entry.path().to_path_buf()));
@@ -629,7 +733,7 @@ pub async fn perform_pull(_app: &AppHandle) -> Result<SyncResult> {
         repo::clone_repo(&remote_url, &sync_repo, &token)?
     };
 
-    let remote_has_data = repo::fetch(&repository, &token)?;
+    let remote_has_data = fetch_with_retry(&repository, &token)?;
     if !remote_has_data {
         return Ok(SyncResult {
             success: true,
@@ -795,7 +899,7 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
             changed_list
         );
         repo::stage_and_commit(&repository, &files_pushed, &message)?;
-        repo::push(&repository, &token)?;
+        push_with_retry(&repository, &token)?;
 
         let mut config = config;
         config.last_synced = Some(chrono::Utc::now().to_rfc3339());
@@ -815,7 +919,7 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
     // failed before reaching GitHub. Push any local commits that are ahead.
     let ahead = repo::count_ahead(&repository).unwrap_or(0);
     if ahead > 0 {
-        repo::push(&repository, &token)?;
+        push_with_retry(&repository, &token)?;
 
         let mut config = config;
         config.last_synced = Some(chrono::Utc::now().to_rfc3339());

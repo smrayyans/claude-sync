@@ -39,6 +39,16 @@ pub fn projects_dir() -> PathBuf {
     resolve_path("CLAUDE_SYNC_PROJECTS_DIR", || claude_dir().join("projects"))
 }
 
+/// Returns the plugins directory (or custom override)
+pub fn plugins_dir() -> PathBuf {
+    resolve_path("CLAUDE_SYNC_PLUGINS_DIR", || claude_dir().join("plugins"))
+}
+
+/// Returns the plans directory (or custom override)
+pub fn plans_dir() -> PathBuf {
+    resolve_path("CLAUDE_SYNC_PLANS_DIR", || claude_dir().join("plans"))
+}
+
 /// Normalize path separators to forward slashes for cross-platform storage
 pub fn normalize_path(path: &str) -> String {
     path.replace('\\', "/")
@@ -253,5 +263,11 @@ pub fn apply_custom_paths(config: &crate::sync::machine::MachineConfig) {
     }
     if let Some(ref d) = p.projects_dir {
         std::env::set_var("CLAUDE_SYNC_PROJECTS_DIR", d);
+    }
+    if let Some(ref d) = p.plugins_dir {
+        std::env::set_var("CLAUDE_SYNC_PLUGINS_DIR", d);
+    }
+    if let Some(ref d) = p.plans_dir {
+        std::env::set_var("CLAUDE_SYNC_PLANS_DIR", d);
     }
 }

@@ -1,6 +1,8 @@
 pub mod conflict;
 pub mod engine;
 pub mod machine;
+pub mod merge;
+pub mod retry;
 pub mod watcher;
 
 use serde::{Deserialize, Serialize};

@@ -89,8 +89,10 @@ impl FileWatcher {
         let claude_dir = claude::claude_dir();
         let agents_dir = claude::agents_dir();
         let projects_dir = claude::projects_dir();
+        let plugins_dir = claude::plugins_dir();
+        let plans_dir = claude::plans_dir();
 
-        for dir in [&claude_dir, &agents_dir, &projects_dir] {
+        for dir in [&claude_dir, &agents_dir, &projects_dir, &plugins_dir, &plans_dir] {
             if dir.exists() {
                 watcher.watch(dir, RecursiveMode::Recursive)?;
             }
