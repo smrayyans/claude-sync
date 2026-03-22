@@ -427,7 +427,13 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
                 // Copy sync repo → local
                 if let Some(content) = &remote_content {
                     if let Some(parent) = local_path.parent() {
+                        if parent.is_symlink() && !parent.exists() {
+                            let _ = std::fs::remove_file(parent);
+                        }
                         std::fs::create_dir_all(parent)?;
+                    }
+                    if local_path.is_symlink() && !local_path.exists() {
+                        let _ = std::fs::remove_file(local_path);
                     }
                     std::fs::write(local_path, content)?;
                     let hash = crate::sync::conflict::hash_content(content);
@@ -798,7 +804,15 @@ pub async fn perform_pull(_app: &AppHandle) -> Result<SyncResult> {
         if remote_path.exists() {
             let content = std::fs::read(&remote_path)?;
             if let Some(parent) = local_path.parent() {
+                // Remove broken symlinks that block directory creation
+                if parent.is_symlink() && !parent.exists() {
+                    let _ = std::fs::remove_file(parent);
+                }
                 std::fs::create_dir_all(parent)?;
+            }
+            // Remove broken symlink at the file path itself
+            if local_path.is_symlink() && !local_path.exists() {
+                let _ = std::fs::remove_file(local_path);
             }
             std::fs::write(local_path, &content)?;
             let hash = crate::sync::conflict::hash_content(&content);
