@@ -135,7 +135,9 @@ fn merge_project_dirs_in(projects: &Path) {
 }
 
 /// Merge contents of src_dir into dst_dir, then remove src_dir.
-/// Existing files in dst_dir are NOT overwritten.
+/// For .jsonl files: append unique lines from src into dst (chat histories).
+/// For other files: copy only if dst doesn't have the file yet.
+/// Never deletes or overwrites existing content.
 fn merge_dir_into(src_dir: &Path, dst_dir: &Path) {
     if dst_dir.exists() {
         for file_entry in WalkDir::new(src_dir)
@@ -145,12 +147,17 @@ fn merge_dir_into(src_dir: &Path, dst_dir: &Path) {
         {
             if let Ok(rel) = file_entry.path().strip_prefix(src_dir) {
                 let dest = dst_dir.join(rel);
-                if !dest.exists() {
-                    if let Some(parent) = dest.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    let _ = std::fs::copy(file_entry.path(), &dest);
+                if let Some(parent) = dest.parent() {
+                    let _ = std::fs::create_dir_all(parent);
                 }
+                if !dest.exists() {
+                    // New file -- just copy it
+                    let _ = std::fs::copy(file_entry.path(), &dest);
+                } else if dest.extension().map_or(false, |ext| ext == "jsonl") {
+                    // Chat history: append lines from src that aren't in dst
+                    merge_jsonl(file_entry.path(), &dest);
+                }
+                // For other existing files (.md etc): keep dst as-is
             }
         }
         let _ = std::fs::remove_dir_all(src_dir);
@@ -159,6 +166,43 @@ fn merge_dir_into(src_dir: &Path, dst_dir: &Path) {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::rename(src_dir, dst_dir);
+    }
+}
+
+/// Append lines from src_jsonl that don't exist in dst_jsonl.
+/// Each line in a .jsonl is a separate JSON message with a unique structure,
+/// so we deduplicate by exact line content.
+fn merge_jsonl(src: &Path, dst: &Path) {
+    use std::collections::HashSet;
+    use std::io::{BufRead, BufReader, Write};
+
+    let dst_content = match std::fs::read_to_string(dst) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let src_content = match std::fs::read_to_string(src) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let existing: HashSet<&str> = dst_content.lines().collect();
+    let mut new_lines: Vec<&str> = vec![];
+    for line in src_content.lines() {
+        if !line.trim().is_empty() && !existing.contains(line) {
+            new_lines.push(line);
+        }
+    }
+
+    if new_lines.is_empty() {
+        return;
+    }
+
+    // Append new lines to the end of dst
+    if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(dst) {
+        for line in &new_lines {
+            let _ = writeln!(file, "{}", line);
+        }
+        log::info!("Merged {} lines into {}", new_lines.len(), dst.display());
     }
 }
 
