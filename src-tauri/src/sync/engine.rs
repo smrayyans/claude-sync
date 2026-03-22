@@ -165,7 +165,31 @@ fn merge_dir_into(src_dir: &Path, dst_dir: &Path) {
         if let Some(parent) = dst_dir.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::rename(src_dir, dst_dir);
+        // rename can fail if dst was created between the exists() check and now
+        if let Err(e) = std::fs::rename(src_dir, dst_dir) {
+            log::warn!("rename failed ({}), falling back to copy+delete", e);
+            // dst might have been created by another migration — merge into it
+            if dst_dir.exists() {
+                for file_entry in WalkDir::new(src_dir)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                {
+                    if let Ok(rel) = file_entry.path().strip_prefix(src_dir) {
+                        let dest = dst_dir.join(rel);
+                        if let Some(parent) = dest.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        if !dest.exists() {
+                            let _ = std::fs::copy(file_entry.path(), &dest);
+                        } else if dest.extension().map_or(false, |ext| ext == "jsonl") {
+                            merge_jsonl(file_entry.path(), &dest);
+                        }
+                    }
+                }
+                let _ = std::fs::remove_dir_all(src_dir);
+            }
+        }
     }
 }
 

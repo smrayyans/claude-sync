@@ -88,28 +88,21 @@ pub fn canonicalize_project_dir(dir_name: &str) -> String {
 pub fn canonicalize_project_dir_universal(dir_name: &str) -> String {
     let stripped = dir_name.trim_start_matches('-');
 
-    // Linux/Mac: "home-<username>-..."
+    // Linux/Mac: "home-<username>-..." or "home-<username>" (home dir itself)
     if stripped.starts_with("home-") {
         let after_home = &stripped["home-".len()..]; // "rayyan-pc-Downloads-Github"
-        // The username is everything up to the next path segment.
-        // Claude Code encodes paths as: /home/user/foo/bar -> -home-user-foo-bar
-        // The username could contain hyphens, but home dirs are typically one segment.
-        // We use a heuristic: match known patterns like "home-<word>-" or "home-<word>-<word>-"
-        // Actually, the simplest approach: find where a known directory name starts
-        // (Downloads, Documents, Desktop, Projects, dev, src, opt, var, etc.)
-        // OR just find the first component after "home-" by checking if removing it
-        // produces a valid canonical result matching our own machine's pattern.
-        //
-        // Safest approach: the username is everything up to where the path diverges
-        // from the home directory. Since Claude Code uses the FULL path, the structure
-        // after the username matches the actual directory structure.
-        // We'll match "home-<anything that's not a common dir>-" greedily.
-
-        // Strategy: try to find the username by matching against common path starts
-        // that come AFTER the home dir. If none found, fall back to first hyphen-word.
         if let Some(idx) = find_path_after_username(after_home) {
             let rest = &after_home[idx..];
+            if rest.is_empty() {
+                return HOME_PLACEHOLDER.to_string();
+            }
             return format!("{HOME_PLACEHOLDER}-{rest}");
+        }
+        // No known path markers found -- this is likely just "home-<username>"
+        // (the home directory itself with no subdirectory)
+        // Check if the whole string looks like just a username (no common dirs)
+        if !after_home.is_empty() && !after_home.contains('/') {
+            return HOME_PLACEHOLDER.to_string();
         }
     }
 
