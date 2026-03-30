@@ -105,6 +105,29 @@ fn migrate_local_project_dirs(claude_dir: &Path) {
     }
 }
 
+/// Collect paths that exist in git HEAD under projects/ but are non-canonical
+/// (machine-specific, e.g. "-home-rayyan-laptop-...") and no longer on disk
+/// because migrate_project_dirs renamed them. These must be staged for deletion
+/// so the next commit removes them from the repository.
+fn collect_stale_git_paths(repo: &git2::Repository, sync_repo: &Path) -> Vec<String> {
+    let Ok(head) = repo.head() else { return vec![] };
+    let Ok(tree) = head.peel_to_tree() else { return vec![] };
+    let mut stale = vec![];
+    let _ = tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+        if entry.kind() == Some(git2::ObjectType::Blob) {
+            let path = format!("{}{}", dir, entry.name().unwrap_or(""));
+            // Non-canonical project path that no longer exists on disk
+            if path.starts_with("projects/") && !path.contains("/_HOME_") {
+                if !sync_repo.join(&path).exists() {
+                    stale.push(path);
+                }
+            }
+        }
+        git2::TreeWalkResult::Ok
+    });
+    stale
+}
+
 /// Canonicalize all project dirs in a directory (for the sync repo).
 fn merge_project_dirs_in(projects: &Path) {
     if !projects.exists() {
@@ -370,6 +393,9 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
     migrate_project_dirs(&sync_repo);
     migrate_local_project_dirs(&claude_dir());
 
+    // Stage deletion of any stale non-canonical project paths left in git after migration
+    let stale_paths = collect_stale_git_paths(&repository, &sync_repo);
+
     // Collect local AND remote files (remote may have new files from other machines)
     let claude_dir = claude_dir();
     let local_files = collect_tracked_files(&claude_dir);
@@ -382,7 +408,7 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
         all_files.entry(key).or_insert(path);
     }
 
-    let mut files_pushed = vec![];
+    let mut files_pushed: Vec<String> = stale_paths; // stale paths go into commit as deletions
     let mut files_pulled = vec![];
     let mut conflicts = vec![];
 
@@ -797,12 +823,39 @@ pub async fn perform_pull(_app: &AppHandle) -> Result<SyncResult> {
     }
 
     let mut files_pulled = vec![];
+    let mut conflicts = vec![];
     let mut hashes = load_hashes();
 
     for (file_key, local_path) in &all_files {
         let remote_path = sync_repo.join(file_key);
         if remote_path.exists() {
             let content = std::fs::read(&remote_path)?;
+
+            // Overwrite protection: if local changed since last sync AND remote also
+            // changed, this is a conflict -- don't silently destroy local work.
+            let remote_hash = crate::sync::conflict::hash_content(&content);
+            let stored_hash = hashes.hashes.get(file_key).cloned();
+            let local_hash = if local_path.exists() {
+                hash_file(local_path).ok()
+            } else {
+                None
+            };
+
+            let local_changed = stored_hash.as_ref()
+                .map_or(false, |sh| local_hash.as_deref() != Some(sh.as_str()));
+            let remote_changed = stored_hash.as_ref()
+                .map_or(true, |sh| remote_hash != *sh);
+
+            if local_changed && remote_changed {
+                // Both sides changed -- report conflict, do not overwrite
+                conflicts.push(file_key.clone());
+                continue;
+            }
+            if !remote_changed {
+                // Remote is same as last sync, local has changes -- keep local
+                continue;
+            }
+
             if let Some(parent) = local_path.parent() {
                 // Remove broken symlinks that block directory creation
                 if parent.is_symlink() && !parent.exists() {
@@ -815,8 +868,7 @@ pub async fn perform_pull(_app: &AppHandle) -> Result<SyncResult> {
                 let _ = std::fs::remove_file(local_path);
             }
             std::fs::write(local_path, &content)?;
-            let hash = crate::sync::conflict::hash_content(&content);
-            update_hash(&mut hashes, file_key, &hash);
+            update_hash(&mut hashes, file_key, &remote_hash);
             files_pulled.push(file_key.clone());
         }
     }
@@ -835,12 +887,18 @@ pub async fn perform_pull(_app: &AppHandle) -> Result<SyncResult> {
     write_machine_config(&config).await?;
 
     let n_pulled = files_pulled.len();
+    let n_conflicts = conflicts.len();
+    let message = if n_conflicts > 0 {
+        format!("Pulled {} files, {} conflicts (local changes not overwritten)", n_pulled, n_conflicts)
+    } else {
+        format!("Pulled {} files from remote", n_pulled)
+    };
     Ok(SyncResult {
         success: true,
         files_pushed: vec![],
         files_pulled,
-        conflicts: vec![],
-        message: format!("Pulled {} files from remote", n_pulled),
+        conflicts,
+        message,
     })
 }
 
@@ -893,8 +951,25 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
 
     let claude_dir = claude_dir();
     let tracked_files = collect_tracked_files(&claude_dir);
-    let mut files_pushed = vec![];
+    // Start files_pushed with stale non-canonical paths so they're staged for deletion
+    let mut files_pushed: Vec<String> = collect_stale_git_paths(&repository, &sync_repo);
     let mut hashes = load_hashes();
+
+    // Propagate local deletions: files in hashes but no longer tracked = deleted locally
+    let tracked_set: std::collections::HashSet<&str> =
+        tracked_files.iter().map(|(k, _)| k.as_str()).collect();
+    let deleted_keys: Vec<String> = hashes.hashes.keys()
+        .filter(|k| !tracked_set.contains(k.as_str()))
+        .cloned()
+        .collect();
+    for key in deleted_keys {
+        let repo_path = sync_repo.join(&key);
+        if repo_path.exists() {
+            let _ = std::fs::remove_file(&repo_path);
+        }
+        hashes.hashes.remove(&key);
+        files_pushed.push(key);
+    }
 
     for (file_key, local_path) in &tracked_files {
         if !local_path.exists() {

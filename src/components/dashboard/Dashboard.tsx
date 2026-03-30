@@ -32,6 +32,28 @@ interface PushDiagnostic {
   error: string | null;
 }
 
+function formatFileKey(key: string): string {
+  if (key === "settings.json") return "Settings";
+  if (key.startsWith("agents/")) return `Agent: ${key.slice("agents/".length).replace(/\.md$/, "")}`;
+  if (key.startsWith("plans/")) return `Plan: ${key.slice("plans/".length).replace(/\.md$/, "")}`;
+  if (key.startsWith("plugins/")) return `Plugin: ${key.slice("plugins/".length)}`;
+  if (key.startsWith("skills/")) return `Skill: ${key.slice("skills/".length).replace(/\.md$/, "")}`;
+
+  const chatMatch = key.match(/^projects\/([^/]+)\/([0-9a-f-]{36})\.jsonl$/);
+  if (chatMatch) {
+    const proj = chatMatch[1].replace("_HOME_", "~").replace(/-/g, "/");
+    return `Chat [${proj}] ${chatMatch[2].slice(0, 8)}`;
+  }
+
+  const memMatch = key.match(/^projects\/([^/]+)\/memory\/(.+)$/);
+  if (memMatch) {
+    const proj = memMatch[1].replace("_HOME_", "~").replace(/-/g, "/");
+    return `Memory [${proj}]: ${memMatch[2]}`;
+  }
+
+  return key;
+}
+
 export default function Dashboard() {
   const {
     status,
@@ -256,17 +278,37 @@ export default function Dashboard() {
             )}
             <span className="text-sm font-medium text-text">{lastResult.message}</span>
           </div>
-          {(lastResult.files_pushed.length > 0 || lastResult.files_pulled.length > 0) && (
-            <div className="text-xs text-text-muted mt-1">
+          {(lastResult.files_pushed.length > 0 || lastResult.files_pulled.length > 0 || lastResult.conflicts.length > 0) && (
+            <div className="text-xs text-text-muted mt-2 space-y-1">
               {lastResult.files_pushed.length > 0 && (
-                <span className="text-success mr-3">
-                  ↑ {lastResult.files_pushed.length} pushed
-                </span>
+                <div>
+                  <span className="text-success font-medium">↑ {lastResult.files_pushed.length} pushed</span>
+                  <ul className="ml-3 mt-0.5 space-y-0.5">
+                    {lastResult.files_pushed.map((f) => (
+                      <li key={f} className="text-text-dim">{formatFileKey(f)}</li>
+                    ))}
+                  </ul>
+                </div>
               )}
               {lastResult.files_pulled.length > 0 && (
-                <span className="text-info">
-                  ↓ {lastResult.files_pulled.length} pulled
-                </span>
+                <div>
+                  <span className="text-info font-medium">↓ {lastResult.files_pulled.length} pulled</span>
+                  <ul className="ml-3 mt-0.5 space-y-0.5">
+                    {lastResult.files_pulled.map((f) => (
+                      <li key={f} className="text-text-dim">{formatFileKey(f)}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {lastResult.conflicts.length > 0 && (
+                <div>
+                  <span className="text-warning font-medium">⚠ {lastResult.conflicts.length} conflict{lastResult.conflicts.length > 1 ? "s" : ""} (local not overwritten)</span>
+                  <ul className="ml-3 mt-0.5 space-y-0.5">
+                    {lastResult.conflicts.map((f) => (
+                      <li key={f} className="text-text-dim">{formatFileKey(f)}</li>
+                    ))}
+                  </ul>
+                </div>
               )}
             </div>
           )}
