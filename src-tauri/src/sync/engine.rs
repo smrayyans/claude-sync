@@ -1056,6 +1056,189 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
     })
 }
 
+/// Push only the file_keys the user explicitly selected (for selective push dialog).
+/// Deletions and modifications are both filtered by the selected set.
+/// Stale non-canonical git paths are always cleaned regardless of selection.
+pub async fn perform_push_selective(_app: &AppHandle, selected_keys: std::collections::HashSet<String>) -> Result<SyncResult> {
+    let config = read_machine_config().await?;
+
+    let remote_url = match &config.remote_url {
+        Some(url) => url.clone(),
+        None => return Ok(SyncResult {
+            success: false, files_pushed: vec![], files_pulled: vec![], conflicts: vec![],
+            message: "No remote configured.".to_string(),
+        }),
+    };
+
+    let token = auth::get_token(&remote_url).unwrap_or_default();
+    if token.is_empty() {
+        return Ok(SyncResult {
+            success: false, files_pushed: vec![], files_pulled: vec![], conflicts: vec![],
+            message: "No token found. Re-enter your PAT in Settings → Remote.".to_string(),
+        });
+    }
+
+    let sync_repo = sync_repo_path();
+    let repository = if sync_repo.exists() {
+        repo::open_repo(&sync_repo)?
+    } else {
+        repo::clone_repo(&remote_url, &sync_repo, &token)?
+    };
+
+    let remote_has_data = repo::fetch(&repository, &token).unwrap_or(false);
+    if remote_has_data {
+        repo::pull_fast_forward(&repository)?;
+    }
+
+    migrate_project_dirs(&sync_repo);
+    migrate_local_project_dirs(&claude_dir());
+
+    let claude_dir = claude_dir();
+    let tracked_files = collect_tracked_files(&claude_dir);
+    // Always clean stale non-canonical paths from git (housekeeping, not user-controlled)
+    let mut files_pushed: Vec<String> = collect_stale_git_paths(&repository, &sync_repo);
+    let mut hashes = load_hashes();
+
+    // Propagate selected deletions only
+    let tracked_set: std::collections::HashSet<&str> =
+        tracked_files.iter().map(|(k, _)| k.as_str()).collect();
+    let deleted_keys: Vec<String> = hashes.hashes.keys()
+        .filter(|k| !tracked_set.contains(k.as_str()) && selected_keys.contains(k.as_str()))
+        .cloned()
+        .collect();
+    for key in deleted_keys {
+        let repo_path = sync_repo.join(&key);
+        if repo_path.exists() {
+            let _ = std::fs::remove_file(&repo_path);
+        }
+        hashes.hashes.remove(&key);
+        files_pushed.push(key);
+    }
+
+    // Push only selected file changes
+    for (file_key, local_path) in &tracked_files {
+        if !selected_keys.contains(file_key.as_str()) {
+            continue;
+        }
+        if !local_path.exists() {
+            continue;
+        }
+        let committed = repo::get_file_from_head(&repository, file_key);
+        let changed = match committed {
+            None => true,
+            Some(ref head_bytes) => std::fs::read(local_path).unwrap_or_default() != *head_bytes,
+        };
+        if changed {
+            let repo_path = sync_repo.join(file_key);
+            if let Some(parent) = repo_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(local_path, &repo_path)?;
+            if let Some(hash) = hash_file(local_path).ok() {
+                update_hash(&mut hashes, file_key, &hash);
+            }
+            files_pushed.push(file_key.clone());
+        }
+    }
+
+    save_hashes(&hashes)?;
+
+    if !files_pushed.is_empty() {
+        let changed_list = files_pushed.iter().map(|f| format!("  - {f}")).collect::<Vec<_>>().join("\n");
+        let message = format!("[{}] push (selective): {} files\n\nChanged:\n{}", config.machine_name, files_pushed.len(), changed_list);
+        repo::stage_and_commit(&repository, &files_pushed, &message)?;
+        push_with_retry(&repository, &token)?;
+        let mut config = config;
+        config.last_synced = Some(chrono::Utc::now().to_rfc3339());
+        write_machine_config(&config).await?;
+        let n = files_pushed.len();
+        return Ok(SyncResult { success: true, files_pushed, files_pulled: vec![], conflicts: vec![], message: format!("Pushed {} files to remote", n) });
+    }
+
+    Ok(SyncResult { success: true, files_pushed: vec![], files_pulled: vec![], conflicts: vec![], message: "Nothing to push — already up to date.".to_string() })
+}
+
+/// Get a preview of a file's current local content and its last committed (sync repo) content.
+pub fn get_file_preview_data(file_key: &str) -> (Option<String>, Option<String>, String) {
+    use crate::claude::localize_file_key;
+    let local_key = localize_file_key(file_key);
+    let local_path = claude_dir().join(&local_key);
+    let sync_repo = sync_repo_path();
+
+    let local_content = if local_path.exists() {
+        std::fs::read_to_string(&local_path).ok().map(|s| {
+            // For jsonl, summarize instead of dumping raw JSON
+            if file_key.ends_with(".jsonl") {
+                summarize_jsonl(&s)
+            } else if s.len() > 8000 {
+                format!("{}\n\n... ({} chars total, truncated)", &s[..8000], s.len())
+            } else {
+                s
+            }
+        })
+    } else {
+        None
+    };
+
+    let sync_content = if sync_repo.exists() {
+        repo::open_repo(&sync_repo).ok()
+            .and_then(|r| repo::get_file_from_head(&r, file_key))
+            .and_then(|b| String::from_utf8(b).ok())
+            .map(|s| if s.len() > 8000 { format!("{}\n\n... truncated", &s[..8000]) } else { s })
+    } else {
+        None
+    };
+
+    let local_path_str = local_path.to_string_lossy().to_string();
+    (local_content, sync_content, local_path_str)
+}
+
+/// Summarize a JSONL chat file into readable form (first few user/assistant messages).
+fn summarize_jsonl(content: &str) -> String {
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        message: Option<Msg>,
+        #[serde(rename = "isMeta")]
+        is_meta: Option<bool>,
+        #[serde(rename = "isSidechain")]
+        is_sidechain: Option<bool>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Msg {
+        role: Option<String>,
+        content: Option<serde_json::Value>,
+    }
+
+    let mut lines = vec![];
+    for raw in content.lines().take(200) {
+        if let Ok(entry) = serde_json::from_str::<Entry>(raw) {
+            if entry.is_meta.unwrap_or(false) || entry.is_sidechain.unwrap_or(false) { continue; }
+            if let Some(msg) = entry.message {
+                let role = msg.role.as_deref().unwrap_or("");
+                if role != "user" && role != "assistant" { continue; }
+                let text = match &msg.content {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(serde_json::Value::Array(arr)) => arr.iter().filter_map(|v| {
+                        if v.get("type")?.as_str()? == "text" { v.get("text")?.as_str().map(|s| s.to_string()) } else { None }
+                    }).collect::<Vec<_>>().join("\n"),
+                    _ => continue,
+                };
+                if text.is_empty() || text.starts_with("<") { continue; }
+                let prefix = if role == "user" { "You" } else { "Claude" };
+                let snippet = text.chars().take(200).collect::<String>();
+                lines.push(format!("[{prefix}]: {snippet}"));
+                if lines.len() >= 6 { break; }
+            }
+        }
+    }
+    if lines.is_empty() {
+        "(No readable messages found)".to_string()
+    } else {
+        let total = content.lines().count();
+        format!("--- Chat preview ({total} lines total) ---\n\n{}", lines.join("\n\n"))
+    }
+}
+
 pub fn get_pending_changes() -> Vec<FileChange> {
     let claude_dir = claude_dir();
     let tracked = collect_tracked_files(&claude_dir);

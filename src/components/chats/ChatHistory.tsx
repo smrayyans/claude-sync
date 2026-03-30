@@ -209,6 +209,13 @@ export default function ChatHistory() {
                 <HardDrive size={10} className="text-text-dim" />
               )}
             </div>
+            <div
+              className="text-xs text-text-dim mt-0.5 font-mono truncate cursor-pointer hover:text-text-muted"
+              title={selected.path}
+              onClick={() => navigator.clipboard?.writeText(selected.path)}
+            >
+              {selected.path}
+            </div>
           </div>
           <button
             onClick={() => handleDeleteSingle(selected)}

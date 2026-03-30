@@ -174,3 +174,31 @@ pub async fn diagnose_push() -> PushDiagnostic {
         files_to_push, error: None,
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilePreview {
+    pub file_key: String,
+    pub local_path: String,
+    pub local_content: Option<String>,
+    pub sync_content: Option<String>,
+}
+
+/// Return the current local content and last committed content for a file key.
+/// Used by the UI to show a preview when clicking a pending change.
+#[tauri::command]
+pub fn get_file_preview(file_key: String) -> Result<FilePreview, String> {
+    let (local_content, sync_content, local_path) =
+        engine::get_file_preview_data(&file_key);
+    Ok(FilePreview { file_key, local_path, local_content, sync_content })
+}
+
+/// Push only the explicitly selected file keys (selective push from the UI dialog).
+#[tauri::command]
+pub async fn sync_push_selective(app: AppHandle, file_keys: Vec<String>) -> Result<SyncResult, String> {
+    let lock = app.state::<SyncLock>();
+    let _guard = lock.0.lock().await;
+    let selected: std::collections::HashSet<String> = file_keys.into_iter().collect();
+    engine::perform_push_selective(&app, selected)
+        .await
+        .map_err(|e| e.to_string())
+}

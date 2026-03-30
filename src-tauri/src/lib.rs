@@ -40,6 +40,8 @@ pub fn run() {
             sync_now,
             sync_pull,
             sync_push,
+            sync_push_selective,
+            get_file_preview,
             get_pull_log,
             get_sync_status,
             get_pending_changes,

@@ -11,11 +11,15 @@ import {
   ArrowDown,
   ArrowUp,
   Bug,
+  X,
+  Trash2,
+  Edit3,
+  Plus,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import { useSyncStore } from "../../stores/syncStore";
+import { useSyncStore, FileChange, SyncResult } from "../../stores/syncStore";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { formatRelativeTime } from "../../lib/utils";
+import { formatRelativeTime, formatBytes, cn } from "../../lib/utils";
 import PendingChanges from "./PendingChanges";
 import SyncStatus from "./SyncStatus";
 
@@ -72,6 +76,10 @@ export default function Dashboard() {
   const [diagLoading, setDiagLoading] = useState(false);
   const { machineConfig } = useSettingsStore();
 
+  // Selective push dialog state
+  const [showPushDialog, setShowPushDialog] = useState(false);
+  const [pushSelected, setPushSelected] = useState<Set<string>>(new Set());
+
   useEffect(() => {
     refreshStatus();
     checkRepoStatus();
@@ -101,17 +109,53 @@ export default function Dashboard() {
       setDiagLoading(false);
     }
   };
+
   const handlePull = async () => {
     try { await pullNow(); await checkRepoStatus(); } catch (e) { console.error(e); }
   };
-  const handlePush = async () => {
-    try { await pushNow(); await checkRepoStatus(); } catch (e) { console.error(e); }
+
+  // Open selective push dialog, pre-select all pending changes
+  const handlePushClick = () => {
+    const changes = repoStatus?.local_changes ?? [];
+    if (changes.length === 0) {
+      // Nothing pending — push anyway (will push any ahead commits)
+      pushNow().then(() => checkRepoStatus());
+      return;
+    }
+    setPushSelected(new Set(changes.map((c) => c.path)));
+    setShowPushDialog(true);
+  };
+
+  const handlePushConfirm = async () => {
+    setShowPushDialog(false);
+    const selected = Array.from(pushSelected);
+    const allPaths = (repoStatus?.local_changes ?? []).map((c) => c.path);
+    const isAll = selected.length === allPaths.length;
+
+    try {
+      let result: SyncResult;
+      if (isAll) {
+        result = await pushNow();
+      } else {
+        const { setIsSyncing } = useSyncStore.getState();
+        setIsSyncing(true);
+        result = await invoke<SyncResult>("sync_push_selective", { fileKeys: selected });
+        setIsSyncing(false);
+        useSyncStore.setState({ lastResult: result });
+        await refreshStatus();
+        await useSyncStore.getState().refreshPending();
+      }
+      await checkRepoStatus();
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   const localCount = repoStatus?.local_changes.length ?? 0;
   const remoteCount = repoStatus?.commits_behind ?? 0;
 
   return (
+    <>
     <div className="p-6 max-w-4xl">
       <div className="flex items-center justify-between mb-6">
         <div>
@@ -135,9 +179,9 @@ export default function Dashboard() {
             )}
           </button>
           <button
-            onClick={handlePush}
+            onClick={handlePushClick}
             disabled={isSyncing || isRefreshing}
-            title="Push — commit local changes to remote"
+            title="Push — select and commit local changes to remote"
             className="btn-secondary flex items-center gap-1.5 text-sm"
           >
             <Upload size={14} className={isSyncing ? "animate-bounce" : ""} />
@@ -347,5 +391,108 @@ export default function Dashboard() {
         )}
       </div>
     </div>
+
+    {/* Selective push dialog */}
+    {showPushDialog && (
+      <div
+        className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+        onClick={() => setShowPushDialog(false)}
+      >
+        <div
+          className="bg-surface rounded-xl border border-border w-full max-w-lg shadow-xl flex flex-col max-h-[80vh]"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between p-4 border-b border-border flex-shrink-0">
+            <div>
+              <h3 className="text-base font-semibold text-text">Push to GitHub</h3>
+              <p className="text-xs text-text-muted mt-0.5">
+                Select which changes to push. Uncheck items to skip them this time.
+              </p>
+            </div>
+            <button onClick={() => setShowPushDialog(false)} className="btn-ghost p-1.5">
+              <X size={14} />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 space-y-1">
+            {/* Select all / none */}
+            <div className="flex gap-3 mb-3 text-xs">
+              <button
+                onClick={() => setPushSelected(new Set((repoStatus?.local_changes ?? []).map((c) => c.path)))}
+                className="text-accent hover:underline"
+              >
+                Select all
+              </button>
+              <button
+                onClick={() => setPushSelected(new Set())}
+                className="text-text-muted hover:underline"
+              >
+                None
+              </button>
+            </div>
+
+            {(repoStatus?.local_changes ?? []).map((change) => {
+              const checked = pushSelected.has(change.path);
+              const isDeletion = change.change_type === "deleted";
+              return (
+                <label
+                  key={change.path}
+                  className={cn(
+                    "flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer hover:bg-surface-2 transition-colors",
+                    isDeletion && "border border-error/20 bg-error/5"
+                  )}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => {
+                      setPushSelected((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) next.add(change.path);
+                        else next.delete(change.path);
+                        return next;
+                      });
+                    }}
+                    className="rounded flex-shrink-0"
+                  />
+                  <div className="flex-shrink-0">
+                    {isDeletion
+                      ? <Trash2 size={12} className="text-error" />
+                      : change.change_type === "added"
+                        ? <Plus size={12} className="text-success" />
+                        : <Edit3 size={12} className="text-warning" />
+                    }
+                  </div>
+                  <span className={cn("flex-1 text-xs truncate", isDeletion ? "text-error" : "text-text")}>
+                    {formatFileKey(change.path)}
+                    {isDeletion && <span className="ml-1 text-[10px] text-error/70">(will be deleted from remote)</span>}
+                  </span>
+                  {change.size_bytes !== undefined && !isDeletion && (
+                    <span className="text-xs text-text-dim flex-shrink-0">{formatBytes(change.size_bytes)}</span>
+                  )}
+                </label>
+              );
+            })}
+          </div>
+
+          <div className="flex gap-2 justify-end p-4 border-t border-border flex-shrink-0">
+            <button
+              onClick={() => setShowPushDialog(false)}
+              className="btn-ghost px-4 py-2 text-sm"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handlePushConfirm}
+              disabled={pushSelected.size === 0}
+              className="px-4 py-2 text-sm rounded-lg bg-accent/20 text-accent hover:bg-accent/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Push {pushSelected.size} file{pushSelected.size !== 1 ? "s" : ""}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
