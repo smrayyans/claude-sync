@@ -2,11 +2,21 @@
 
 Sync Claude Code environments across machines using a private Git remote.
 
-Keeps `agents/`, `skills/`, `projects/*/memory/`, `settings.json`, and **chat history** in sync — with a full GUI for browsing, editing, and resolving conflicts.
-
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-informational)
 ![Built with](https://img.shields.io/badge/Tauri%20v2%20%2B%20Rust-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
+
+---
+
+## Why claude-sync?
+
+Claude Code stores your agents, skills, memory, chat history, and settings locally under `~/.claude`. The moment you switch machines, you start from scratch.
+
+claude-sync fixes this. It keeps everything in a private GitHub repo and gives you a GUI to browse, edit, and resolve conflicts — so your entire Claude Code environment travels with you.
+
+- **No config drift** — one source of truth across all your machines
+- **Full history** — every push is a Git commit; roll back anything
+- **Private by default** — your data stays in your own GitHub repo
 
 ---
 
@@ -14,33 +24,36 @@ Keeps `agents/`, `skills/`, `projects/*/memory/`, `settings.json`, and **chat hi
 
 Download from [Releases](https://github.com/smrayyans/claude-sync/releases).
 
-### Linux (Debian/Ubuntu/Kali)
+### Linux (Debian / Ubuntu / Kali)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/smrayyans/claude-sync/main/setup.sh | bash
 ```
 
-That's it. Search **"Claude Sync"** in your app menu or run `claude-sync`.
+Then search **"Claude Sync"** in your app menu, or run `claude-sync` in terminal.
 
 ```bash
 sudo apt remove claude-sync    # uninstall
 ```
 
-> **Update:** just run the install command again.
+> **Update:** run the install command again.
 
 <details>
 <summary>Alternative: AppImage (no root needed)</summary>
 
 Download `.AppImage` + `install.sh` from [Releases](https://github.com/smrayyans/claude-sync/releases), then:
+
 ```bash
 chmod +x install.sh && ./install.sh
 ```
+
 Uninstall: `chmod +x uninstall.sh && ./uninstall.sh`
+
 </details>
 
 ### Windows
 
-Download and run `claude-sync_*_x64-setup.exe`. It installs to your Start Menu automatically.
+Download and run `claude-sync_*_x64-setup.exe` from [Releases](https://github.com/smrayyans/claude-sync/releases). Installs to your Start Menu automatically.
 
 <details>
 <summary>Alternative: .msi installer</summary>
@@ -48,11 +61,12 @@ Download and run `claude-sync_*_x64-setup.exe`. It installs to your Start Menu a
 ```
 claude-sync_*_x64_en-US.msi
 ```
+
 </details>
 
 ---
 
-## Setup
+## Setup (3 steps)
 
 1. **Create a private repo** on GitHub — name it `claude-data`, leave it empty
 2. **Generate a PAT** — `GitHub → Settings → Developer settings → Personal access tokens (classic)` → `repo` scope
@@ -63,7 +77,7 @@ claude-sync_*_x64_en-US.msi
 ## What gets synced
 
 | Path | Description |
-|------|-------------|
+|---|---|
 | `~/.claude/agents/*.md` | Custom subagent definitions |
 | `~/.claude/skills/*.md` | Slash commands |
 | `~/.claude/projects/*/memory/**` | Per-project memory |
@@ -76,27 +90,35 @@ claude-sync_*_x64_en-US.msi
 
 ## Features
 
-- **Dashboard** — Refresh / Pull / Push, status banners, device pull history, diagnose button
-- **Agents** — Browse, create, edit with Monaco editor + 5 built-in templates
-- **Memory** — Project tree with file browser and editor
-- **Chats** — Browse all past Claude Code conversations by project
-- **Sync Log** — Git commit history with diffs, conflict resolver (Mine / Theirs / Manual)
-- **Settings** — Remote config, machine name, auto-sync interval, custom paths, machine-local overrides
+| Feature | Description |
+|---|---|
+| Dashboard | Refresh / Pull / Push, sync status, device pull history, diagnostics |
+| Agents | Browse, create, and edit agent definitions with Monaco editor + 5 templates |
+| Memory | Project tree with file browser and inline editor |
+| Chats | Browse all past Claude Code conversations by project |
+| Sync Log | Git commit history with diffs and a conflict resolver (Mine / Theirs / Manual) |
+| Settings | Remote config, machine name, auto-sync interval, custom paths, machine-local overrides |
 
 ---
 
+## Advanced
+
 <details>
-<summary><strong>Advanced</strong></summary>
+<summary>Custom paths</summary>
 
-### Custom paths
+Override default `~/.claude` directories in **Settings → Paths**. Config is stored in `~/.claude-sync/config.json` and applied via env vars at startup.
 
-Override default `~/.claude` directories in **Settings → Paths**. Stored in `~/.claude-sync/config.json`, applied via env vars at startup.
+</details>
 
-### Machine-local overrides
+<details>
+<summary>Machine-local overrides</summary>
 
-Keys listed in **Settings → Machine → Overrides** are stripped before push and ignored on pull. Useful for per-machine prefs like `settings.theme`.
+Keys listed in **Settings → Machine → Overrides** are stripped before push and ignored on pull. Useful for per-machine preferences like `settings.theme`.
 
-### Config reference
+</details>
+
+<details>
+<summary>Config reference</summary>
 
 ```json
 // ~/.claude-sync/config.json
@@ -110,9 +132,12 @@ Keys listed in **Settings → Machine → Overrides** are stripped before push a
 }
 ```
 
-PAT is stored in OS keychain (libsecret / Credential Manager) — never on disk.
+PAT is stored in the OS keychain (libsecret / Credential Manager) — never written to disk.
 
-### Build from source
+</details>
+
+<details>
+<summary>Build from source</summary>
 
 ```bash
 sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
@@ -124,10 +149,16 @@ PATH="$HOME/.cargo/bin:$PATH" npm run tauri build
 
 ---
 
-## Tech stack
+## Tech Stack
 
-Tauri v2 · Rust · git2 · React · TypeScript · Zustand · Monaco Editor · Tailwind CSS
+| Layer | Technologies |
+|---|---|
+| Desktop shell | Tauri v2, Rust, git2 |
+| Frontend | React, TypeScript, Zustand, Tailwind CSS |
+| Editor | Monaco Editor |
 
 ---
 
-MIT License
+## License
+
+[MIT](LICENSE)
