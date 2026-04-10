@@ -8,6 +8,13 @@ export interface CustomPaths {
   projectsDir?: string;
 }
 
+export interface ExtraSyncTarget {
+  name: string;
+  local_path: string;
+  enabled: boolean;
+  exclude_patterns: string[];
+}
+
 export interface MachineConfig {
   machineId: string;
   machineName: string;
@@ -16,6 +23,7 @@ export interface MachineConfig {
   machineOverrides: string[];
   lastSynced?: string;
   customPaths: CustomPaths;
+  extraSyncTargets?: ExtraSyncTarget[];
 }
 
 export interface AppSettings {

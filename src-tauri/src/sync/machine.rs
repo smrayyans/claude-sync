@@ -76,6 +76,16 @@ impl Default for CustomPaths {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtraSyncTarget {
+    pub name: String,
+    pub local_path: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub exclude_patterns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MachineConfig {
     #[serde(rename = "machineId")]
     pub machine_id: String,
@@ -91,6 +101,8 @@ pub struct MachineConfig {
     pub last_synced: Option<String>,
     #[serde(rename = "customPaths", default)]
     pub custom_paths: CustomPaths,
+    #[serde(rename = "extraSyncTargets", default)]
+    pub extra_sync_targets: Vec<ExtraSyncTarget>,
 }
 
 impl Default for MachineConfig {
@@ -107,6 +119,7 @@ impl Default for MachineConfig {
             machine_overrides: vec![],
             last_synced: None,
             custom_paths: CustomPaths::default(),
+            extra_sync_targets: vec![],
         }
     }
 }

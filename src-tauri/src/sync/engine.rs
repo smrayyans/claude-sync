@@ -11,7 +11,7 @@ use crate::sync::{
         detect_conflict, load_hashes, save_hashes, update_hash, hash_file,
         apply_resolution, ConflictStatus, Resolution,
     },
-    machine::{read_machine_config, write_machine_config, append_pull_log, read_pull_log, PullLogEntry},
+    machine::{read_machine_config, write_machine_config, append_pull_log, read_pull_log, PullLogEntry, ExtraSyncTarget},
     watcher::wait_for_stable,
     ChangeType, FileChange, RepoStatus, SyncResult, SyncStatus,
 };
@@ -40,6 +40,67 @@ fn is_excluded(path: &Path, claude_dir: &Path) -> bool {
         }
     }
     false
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        dirs::home_dir().unwrap_or_default().join(rest)
+    } else if path == "~" {
+        dirs::home_dir().unwrap_or_default()
+    } else {
+        PathBuf::from(path)
+    }
+}
+
+fn is_vault_excluded(rel_path: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|p| {
+        if let Some(prefix) = p.strip_suffix("/*") {
+            rel_path.starts_with(&format!("{}/", prefix))
+        } else if p.ends_with('/') {
+            rel_path.starts_with(p.as_str())
+        } else {
+            rel_path == p || rel_path.starts_with(&format!("{}/", p))
+        }
+    })
+}
+
+fn localize_vault_key(file_key: &str, targets: &[ExtraSyncTarget]) -> Option<PathBuf> {
+    let rest = file_key.strip_prefix("vaults/")?;
+    let slash = rest.find('/')?;
+    let name = &rest[..slash];
+    let rel = &rest[slash + 1..];
+    let target = targets.iter().find(|t| t.name == name && t.enabled)?;
+    Some(expand_tilde(&target.local_path).join(rel))
+}
+
+fn ensure_vault_gitignore(sync_repo: &Path, targets: &[ExtraSyncTarget]) {
+    let gitignore_path = sync_repo.join(".gitignore");
+    let existing = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
+
+    let mut base_lines: Vec<&str> = vec![];
+    let mut skip = false;
+    for line in existing.lines() {
+        if line.starts_with("# vault-start:") { skip = true; continue; }
+        if line.starts_with("# vault-end:") { skip = false; continue; }
+        if !skip { base_lines.push(line); }
+    }
+
+    let mut content = base_lines.join("\n").trim_end().to_string();
+    if content.is_empty() {
+        content = "# claude-sync managed\n.DS_Store\n*.tmp\n*.bak".to_string();
+    }
+
+    for target in targets {
+        if !target.enabled || target.exclude_patterns.is_empty() { continue; }
+        content.push_str(&format!("\n# vault-start: {}\n", target.name));
+        for pat in &target.exclude_patterns {
+            content.push_str(&format!("vaults/{}/{}\n", target.name, pat));
+        }
+        content.push_str(&format!("# vault-end: {}", target.name));
+    }
+    content.push('\n');
+
+    let _ = std::fs::write(gitignore_path, content);
 }
 
 pub fn sync_repo_path() -> PathBuf {
@@ -393,13 +454,16 @@ pub async fn perform_sync(app: &AppHandle) -> Result<SyncResult> {
     migrate_project_dirs(&sync_repo);
     migrate_local_project_dirs(&claude_dir());
 
+    // Update .gitignore with vault exclusion rules
+    ensure_vault_gitignore(&sync_repo, &config.extra_sync_targets);
+
     // Stage deletion of any stale non-canonical project paths left in git after migration
     let stale_paths = collect_stale_git_paths(&repository, &sync_repo);
 
     // Collect local AND remote files (remote may have new files from other machines)
     let claude_dir = claude_dir();
-    let local_files = collect_tracked_files(&claude_dir);
-    let remote_files = collect_remote_files(&sync_repo, &claude_dir);
+    let local_files = collect_tracked_files(&claude_dir, &config.extra_sync_targets);
+    let remote_files = collect_remote_files(&sync_repo, &claude_dir, &config.extra_sync_targets);
     let mut all_files: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
     for (key, path) in local_files {
         all_files.insert(key, path);
@@ -570,7 +634,7 @@ fn is_local_project_path(path: &Path, projects_dir: &Path) -> bool {
     true // Non-project files are always local
 }
 
-pub fn collect_tracked_files(claude_dir: &Path) -> Vec<(String, PathBuf)> {
+pub fn collect_tracked_files(claude_dir: &Path, extra_targets: &[ExtraSyncTarget]) -> Vec<(String, PathBuf)> {
     let mut files = vec![];
 
     // settings.json
@@ -703,6 +767,29 @@ pub fn collect_tracked_files(claude_dir: &Path) -> Vec<(String, PathBuf)> {
         }
     }
 
+    // Extra sync targets (e.g. Obsidian vault)
+    for target in extra_targets {
+        if !target.enabled { continue; }
+        let vault_root = expand_tilde(&target.local_path);
+        if !vault_root.exists() { continue; }
+        let prefix = format!("vaults/{}/", target.name);
+        for entry in WalkDir::new(&vault_root)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            if let Ok(rel) = entry.path().strip_prefix(&vault_root) {
+                let rel_str = crate::claude::normalize_path(&rel.to_string_lossy());
+                if is_vault_excluded(&rel_str, &target.exclude_patterns) {
+                    continue;
+                }
+                let key = format!("{}{}", prefix, rel_str);
+                files.push((key, entry.path().to_path_buf()));
+            }
+        }
+    }
+
     // Canonicalize project directory names so they're machine-agnostic in the sync repo.
     // e.g. "projects/-home-rayyan-pc-Downloads-Github/memory/MEMORY.md"
     //   -> "projects/_HOME_-Downloads-Github/memory/MEMORY.md"
@@ -715,7 +802,7 @@ pub fn collect_tracked_files(claude_dir: &Path) -> Vec<(String, PathBuf)> {
 
 /// Scan the sync repo for files that should be pulled — covers files that
 /// exist on remote but not locally (new agents from another machine, etc.).
-pub fn collect_remote_files(sync_repo: &Path, claude_dir: &Path) -> Vec<(String, PathBuf)> {
+pub fn collect_remote_files(sync_repo: &Path, claude_dir: &Path, extra_targets: &[ExtraSyncTarget]) -> Vec<(String, PathBuf)> {
     let mut files = vec![];
 
     for entry in WalkDir::new(sync_repo)
@@ -734,9 +821,18 @@ pub fn collect_remote_files(sync_repo: &Path, claude_dir: &Path) -> Vec<(String,
 
         if let Ok(rel) = entry.path().strip_prefix(sync_repo) {
             let canonical_key = crate::claude::normalize_path(&rel.to_string_lossy());
+
+            if canonical_key.starts_with("vaults/") {
+                // Vault file: resolve to local path via configured targets
+                if let Some(local_path) = localize_vault_key(&canonical_key, extra_targets) {
+                    files.push((canonical_key, local_path));
+                }
+                // If no matching target configured, skip
+                continue;
+            }
+
             // Remap canonical project dirs to local machine's paths
             let local_key = localize_file_key(&canonical_key);
-
             let local_path = claude_dir.join(&local_key);
             if is_excluded(&local_path, claude_dir) {
                 continue;
@@ -806,12 +902,15 @@ pub async fn perform_pull(_app: &AppHandle) -> Result<SyncResult> {
     migrate_project_dirs(&sync_repo);
     migrate_local_project_dirs(&claude_dir());
 
+    // Update .gitignore with vault exclusion rules
+    ensure_vault_gitignore(&sync_repo, &config.extra_sync_targets);
+
     let claude_dir = claude_dir();
 
     // Scan BOTH local files and sync repo files — the sync repo may have
     // files that don't exist locally yet (new agents from another machine).
-    let local_files = collect_tracked_files(&claude_dir);
-    let remote_files = collect_remote_files(&sync_repo, &claude_dir);
+    let local_files = collect_tracked_files(&claude_dir, &config.extra_sync_targets);
+    let remote_files = collect_remote_files(&sync_repo, &claude_dir, &config.extra_sync_targets);
 
     // Merge into a deduplicated map (file_key → local_path)
     let mut all_files: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
@@ -949,8 +1048,11 @@ pub async fn perform_push(_app: &AppHandle) -> Result<SyncResult> {
     migrate_project_dirs(&sync_repo);
     migrate_local_project_dirs(&claude_dir());
 
+    // Update .gitignore with vault exclusion rules
+    ensure_vault_gitignore(&sync_repo, &config.extra_sync_targets);
+
     let claude_dir = claude_dir();
-    let tracked_files = collect_tracked_files(&claude_dir);
+    let tracked_files = collect_tracked_files(&claude_dir, &config.extra_sync_targets);
     // Start files_pushed with stale non-canonical paths so they're staged for deletion
     let mut files_pushed: Vec<String> = collect_stale_git_paths(&repository, &sync_repo);
     let mut hashes = load_hashes();
@@ -1093,8 +1195,10 @@ pub async fn perform_push_selective(_app: &AppHandle, selected_keys: std::collec
     migrate_project_dirs(&sync_repo);
     migrate_local_project_dirs(&claude_dir());
 
+    ensure_vault_gitignore(&sync_repo, &config.extra_sync_targets);
+
     let claude_dir = claude_dir();
-    let tracked_files = collect_tracked_files(&claude_dir);
+    let tracked_files = collect_tracked_files(&claude_dir, &config.extra_sync_targets);
     // Always clean stale non-canonical paths from git (housekeeping, not user-controlled)
     let mut files_pushed: Vec<String> = collect_stale_git_paths(&repository, &sync_repo);
     let mut hashes = load_hashes();
@@ -1161,8 +1265,15 @@ pub async fn perform_push_selective(_app: &AppHandle, selected_keys: std::collec
 /// Get a preview of a file's current local content and its last committed (sync repo) content.
 pub fn get_file_preview_data(file_key: &str) -> (Option<String>, Option<String>, String) {
     use crate::claude::localize_file_key;
-    let local_key = localize_file_key(file_key);
-    let local_path = claude_dir().join(&local_key);
+
+    let local_path = if file_key.starts_with("vaults/") {
+        let extra_targets = read_extra_sync_targets_sync();
+        localize_vault_key(file_key, &extra_targets)
+            .unwrap_or_else(|| claude_dir().join(file_key))
+    } else {
+        let local_key = localize_file_key(file_key);
+        claude_dir().join(&local_key)
+    };
     let sync_repo = sync_repo_path();
 
     let local_content = if local_path.exists() {
@@ -1239,9 +1350,20 @@ fn summarize_jsonl(content: &str) -> String {
     }
 }
 
+fn read_extra_sync_targets_sync() -> Vec<ExtraSyncTarget> {
+    let path = crate::sync::machine::config_path();
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("extraSyncTargets").cloned())
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
 pub fn get_pending_changes() -> Vec<FileChange> {
     let claude_dir = claude_dir();
-    let tracked = collect_tracked_files(&claude_dir);
+    let extra_targets = read_extra_sync_targets_sync();
+    let tracked = collect_tracked_files(&claude_dir, &extra_targets);
     let hashes = load_hashes();
     let mut changes = vec![];
 
@@ -1341,7 +1463,7 @@ pub async fn check_repo_status() -> RepoStatus {
 
     // Compare local files vs what's in the sync repo (ground truth of last push)
     let claude_dir = claude_dir();
-    let tracked = collect_tracked_files(&claude_dir);
+    let tracked = collect_tracked_files(&claude_dir, &config.extra_sync_targets);
     let mut local_changes = vec![];
 
     for (file_key, local_path) in &tracked {

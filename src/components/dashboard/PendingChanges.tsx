@@ -27,6 +27,9 @@ function formatFileKey(key: string): string {
     const proj = memMatch[1].replace("_HOME_", "~").replace(/-/g, "/");
     return `Memory [${proj}]: ${memMatch[2]}`;
   }
+  const vaultMatch = key.match(/^vaults\/([^/]+)\/(.+)$/);
+  if (vaultMatch) return `Vault [${vaultMatch[1]}]: ${vaultMatch[2]}`;
+
   return key;
 }
 

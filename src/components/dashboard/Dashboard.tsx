@@ -55,6 +55,9 @@ function formatFileKey(key: string): string {
     return `Memory [${proj}]: ${memMatch[2]}`;
   }
 
+  const vaultMatch = key.match(/^vaults\/([^/]+)\/(.+)$/);
+  if (vaultMatch) return `Vault [${vaultMatch[1]}]: ${vaultMatch[2]}`;
+
   return key;
 }
 

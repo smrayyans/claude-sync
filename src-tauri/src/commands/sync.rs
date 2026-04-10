@@ -148,7 +148,7 @@ pub async fn diagnose_push() -> PushDiagnostic {
     let commits_ahead = repo::count_ahead(&repository).unwrap_or(0);
 
     let claude_dir = claude_dir();
-    let tracked_files = collect_tracked_files(&claude_dir);
+    let tracked_files = collect_tracked_files(&claude_dir, &[]);
     let tracked_files_count = tracked_files.len();
     let mut files_to_push = vec![];
 
